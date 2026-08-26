@@ -19,8 +19,14 @@ public sealed class SmartScheduler : IDisposable
 
     private readonly AppConfig _cfg;
     private readonly LlamaServerProcess _server = new();
-    // 代理用 HttpClient：推理请求可能很长，禁用客户端超时
-    private readonly HttpClient _hc = new() { Timeout = System.Threading.Timeout.InfiniteTimeSpan };
+    // 代理用 HttpClient：推理请求可能很长，禁用客户端超时。
+    // Connection: close —— 不复用池化 keep-alive 连接：llama-server 会关闭空闲连接、
+    // 休眠/唤醒后旧端口残留死连接，复用都会报 "An error occurred while sending the request."
+    private readonly HttpClient _hc = new()
+    {
+        Timeout = System.Threading.Timeout.InfiniteTimeSpan,
+        DefaultRequestHeaders = { { "Connection", "close" } },
+    };
     private readonly HttpListener _listener = new();
     private readonly System.Threading.Timer _tickTimer;
     private readonly object _wakeGate = new();
@@ -211,7 +217,9 @@ public sealed class SmartScheduler : IDisposable
         }
         catch (Exception ex)
         {
-            Log?.Invoke($"请求处理失败：{ex.Message}");
+            // 带上内层异常细节，便于定位（如连接重置 vs 超时）
+            var detail = ex.InnerException != null ? $"（内层：{ex.InnerException.Message}）" : "";
+            Log?.Invoke($"请求处理失败：{ex.Message}{detail}");
             WriteError(ctx, 503, ex.Message);
         }
         finally
@@ -393,25 +401,39 @@ public sealed class SmartScheduler : IDisposable
             }
         }
 
-        using var resp = await _hc.SendAsync(msg, HttpCompletionOption.ResponseHeadersRead);
-        var outResp = ctx.Response;
-        outResp.StatusCode = (int)resp.StatusCode;
-        var ct = resp.Content.Headers.ContentType?.ToString();
-        outResp.ContentType = string.IsNullOrEmpty(ct) ? "application/octet-stream" : ct!;
+        HttpResponseMessage resp;
         try
         {
-            await resp.Content.CopyToAsync(outResp.OutputStream);
+            resp = await _hc.SendAsync(msg, HttpCompletionOption.ResponseHeadersRead);
         }
-        catch (Exception)
+        catch (HttpRequestException)
         {
-            // 客户端断开/写入失败：方法退出时 dispose resp 关闭后端连接，
-            // llama-server 检测到断开会取消任务并保留部分槽位 KV（f_keep），释放 GPU。
-            // 多 agent 模式下这是预期行为（agent 超时/重试），非致命错误。
-            Log?.Invoke("客户端断开，已中止本次生成（多 agent 下属正常重试）。");
+            // 连接层瞬时失败（后端刚重启 / 连接被重置）：稍等后重试一次
+            Log?.Invoke("转发连接异常，正在重试…");
+            await Task.Delay(500);
+            resp = await _hc.SendAsync(msg, HttpCompletionOption.ResponseHeadersRead);
         }
-        finally
+        using (resp)
         {
-            outResp.Close();
+            var outResp = ctx.Response;
+            outResp.StatusCode = (int)resp.StatusCode;
+            var ct = resp.Content.Headers.ContentType?.ToString();
+            outResp.ContentType = string.IsNullOrEmpty(ct) ? "application/octet-stream" : ct!;
+            try
+            {
+                await resp.Content.CopyToAsync(outResp.OutputStream);
+            }
+            catch (Exception)
+            {
+                // 客户端断开/写入失败：方法退出时 dispose resp 关闭后端连接，
+                // llama-server 检测到断开会取消任务并保留部分槽位 KV（f_keep），释放 GPU。
+                // 多 agent 模式下这是预期行为（agent 超时/重试），非致命错误。
+                Log?.Invoke("客户端断开，已中止本次生成（多 agent 下属正常重试）。");
+            }
+            finally
+            {
+                outResp.Close();
+            }
         }
     }
 
