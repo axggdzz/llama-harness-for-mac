@@ -26,16 +26,20 @@ public class MainForm : Form
     private readonly NumericUpDown _numIdleMin = new() { Minimum = 1, Maximum = 120, Dock = DockStyle.Fill };
 
     // —— 操作区 ——
-    private readonly Button _btnStart = new() { Text = "启动 / 唤醒", Dock = DockStyle.Right, AutoSize = true };
-    private readonly Button _btnStop = new() { Text = "停止", Dock = DockStyle.Right, AutoSize = true, Enabled = false };
-    private readonly Button _btnClearLog = new() { Text = "清空日志", Dock = DockStyle.Right, AutoSize = true };
+    // 所有按钮统一尺寸 100x32（与浏览按钮一致）；不用 Dock，Dock 会覆盖固定 Size
+    private readonly Button _btnStart = new() { Text = "启动 / 唤醒", Size = new Size(100, 32) };
+    private readonly Button _btnStop = new() { Text = "停止", Size = new Size(100, 32), Enabled = false };
+    private readonly Button _btnClearLog = new() { Text = "清空日志", Size = new Size(100, 32) };
     private readonly Label _lblStatus = new() { Text = "空闲", Dock = DockStyle.Fill, ForeColor = Color.Gray };
 
     // —— 系统资源统计（操作行下方，2 秒轮询）——
     private readonly SystemMetrics _metrics = new();
     private readonly Label _lblRes = new()
     {
-        Dock = DockStyle.Fill,
+        // 必须是 Top：窗口内只能有一个 Fill 控件（_split），
+        // 若此处用 Fill 会与之竞争导致两者被压成零尺寸
+        Dock = DockStyle.Top,
+        Height = 24,
         TextAlign = ContentAlignment.MiddleLeft,
         ForeColor = Color.DimGray,
         Margin = new Padding(8, 0, 8, 4),
@@ -73,8 +77,7 @@ public class MainForm : Form
     private readonly Button _btnClearStats = new()
     {
         Text = "清空统计",
-        Dock = DockStyle.Right,
-        AutoSize = true,
+        Size = new Size(100, 32),
     };
     private readonly DataGridView _gridStats = new()
     {
