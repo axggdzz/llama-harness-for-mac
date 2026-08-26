@@ -181,14 +181,23 @@ public sealed class SmartScheduler : IDisposable
             return;
         }
 
+        bool isInference = IsInferenceRequest(req);
+
+        // 探测类请求（GET /v1/models、健康检查等）无唤醒权：
+        // 服务运行时照常代理；待机/休眠时直接拒绝，防止 Agent 周期性轮探
+        // 把刚休眠的服务反复唤醒（唤醒→15分钟倒计时→再休眠→再唤醒循环）
+        if (!isInference && !_server.IsRunning)
+        {
+            WriteError(ctx, 503, "LLM 服务处于待机/休眠状态，仅推理请求可触发唤醒。");
+            return;
+        }
+
         Interlocked.Increment(ref _inflight);
         try
         {
             // 首请求排队等待唤醒完成（共享同一唤醒任务，防多进程冲突）
             await EnsureRunningAsync();
-            // 只有真实推理请求才刷新闲置计时；探测类请求（GET /v1/models、健康检查等）
-            // 不算使用——否则 Agent 周期性轮询会把倒计时无限续命，导致永不休眠
-            bool isInference = IsInferenceRequest(req);
+            // 只有真实推理请求才刷新闲置计时；探测类请求不算使用
             if (isInference) Touch();
             await ForwardAsync(ctx);       // 代理转发到后端 llama-server（流式直通）
             if (isInference) Touch();      // 请求完成：再次刷新倒计时
