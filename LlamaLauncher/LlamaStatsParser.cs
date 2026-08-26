@@ -35,12 +35,18 @@ public sealed class LlamaStatsParser
 
     private readonly object _gate = new();
     private readonly Dictionary<int, RoundStats> _byTask = new();
+    private readonly List<int> _taskOrder = new(); // task ID 插入顺序，用于按序淘汰最旧轮次
     private long _idCounter;
     // f_sim_best 出现在 print_timing 之前的槽位选择行（get_availabl），归属给下一个新 task
     private double? _pendingFsim;
 
+    /// <summary>每会话最多保留的轮次数，超出自动丢弃最旧的。</summary>
+    public int MaxRounds { get; init; } = 50;
+
     /// <summary>一轮统计被创建或更新时触发（可能来自非 UI 线程）。</summary>
     public event Action<RoundStats>? RoundUpdated;
+    /// <summary>超出上限、最旧轮次被淘汰后触发（可能来自非 UI 线程）。</summary>
+    public event Action<RoundStats>? RoundRemoved;
     /// <summary>会话重置后触发（清空全部记录）。</summary>
     public event Action? SessionReset;
 
@@ -71,6 +77,7 @@ public sealed class LlamaStatsParser
         }
         if (!isTiming) return; // 快速路径：跳过绝大多数行
 
+        List<RoundStats>? evicted = null;
         RoundStats? round = null;
         lock (_gate)
         {
@@ -82,14 +89,28 @@ public sealed class LlamaStatsParser
                 {
                     round = new RoundStats { Id = ++_idCounter, TaskId = taskId, Time = DateTime.Now };
                     _byTask[taskId] = round;
+                    _taskOrder.Add(taskId);
                     // 新 task 继承暂存的 f_sim_best（时间线上它出现在本请求启动之前）
                     round.FSimBest = _pendingFsim;
                     _pendingFsim = null;
+
+                    // 超出上限：按插入顺序丢弃最旧的轮次
+                    while (_taskOrder.Count > MaxRounds)
+                    {
+                        int old = _taskOrder[0];
+                        _taskOrder.RemoveAt(0);
+                        evicted ??= new List<RoundStats>();
+                        evicted.Add(_byTask[old]);
+                        _byTask.Remove(old);
+                    }
                 }
             }
             if (round != null)
                 ApplyLine(round, line);
         }
+        if (evicted is not null)
+            foreach (var r in evicted)
+                RoundRemoved?.Invoke(r);
         if (round != null)
             RoundUpdated?.Invoke(round);
     }
@@ -100,6 +121,7 @@ public sealed class LlamaStatsParser
         lock (_gate)
         {
             _byTask.Clear();
+            _taskOrder.Clear();
             _pendingFsim = null;
         }
         SessionReset?.Invoke();

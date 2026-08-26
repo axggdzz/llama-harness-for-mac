@@ -111,6 +111,7 @@ public class MainForm : Form
         // 统计：日志行喂给解析器；解析结果/会话重置回 UI
         _scheduler.Log += line => _statsParser.Feed(line);
         _statsParser.RoundUpdated += OnRoundUpdated;
+        _statsParser.RoundRemoved += OnRoundRemoved;
         _statsParser.SessionReset += OnSessionReset;
 
         if (loadError != null)
@@ -405,21 +406,38 @@ public class MainForm : Form
 
     // ==================== 统计 ====================
 
-    /// <summary>一轮统计更新（进程输出线程）→ 表格行增量刷新 + 汇总。</summary>
+    /// <summary>一轮统计更新（进程输出线程）→ 表格行增量刷新 + 汇总；新行自动滚到底部。</summary>
     private void OnRoundUpdated(LlamaStatsParser.RoundStats s)
     {
         if (!IsHandleCreated) return;
         BeginInvoke(() =>
         {
             var row = FindStatRow(s.Id);
-            if (row == null)
+            bool isNew = row == null;
+            if (isNew)
             {
                 int idx = _gridStats.Rows.Add();
                 row = _gridStats.Rows[idx];
                 row.Tag = s.Id;
             }
-            FillStatRow(row, s);
+            if (row != null)
+                FillStatRow(row, s);
             UpdateSummary();
+            // 仅新增行时滚动到最后一行（已有行的更新不打扰阅读）：设 CurrentCell 会自动滚入视图
+            if (isNew && row != null)
+                _gridStats.CurrentCell = row.Cells[0];
+        });
+    }
+
+    /// <summary>超出 50 轮上限、最旧轮次被淘汰（解析器线程）→ 删除对应表格行。</summary>
+    private void OnRoundRemoved(LlamaStatsParser.RoundStats s)
+    {
+        if (!IsHandleCreated) return;
+        BeginInvoke(() =>
+        {
+            var row = FindStatRow(s.Id);
+            if (row != null)
+                _gridStats.Rows.Remove(row);
         });
     }
 
