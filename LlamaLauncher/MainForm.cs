@@ -44,6 +44,38 @@ public class MainForm : Form
         Font = new Font("Consolas", 9F),
     };
 
+    // —— 统计区（实时解析 print_timing）——
+    private readonly LlamaStatsParser _statsParser = new();
+    private readonly SplitContainer _split = new()
+    {
+        Dock = DockStyle.Fill,
+        Orientation = Orientation.Horizontal,
+        SplitterWidth = 5,
+    };
+    private readonly Label _lblSummary = new()
+    {
+        Dock = DockStyle.Fill,
+        AutoSize = true,
+        TextAlign = ContentAlignment.MiddleLeft,
+        Margin = new Padding(4, 6, 4, 2),
+    };
+    private readonly Button _btnClearStats = new()
+    {
+        Text = "清空统计",
+        Dock = DockStyle.Right,
+        AutoSize = true,
+    };
+    private readonly DataGridView _gridStats = new()
+    {
+        Dock = DockStyle.Fill,
+        ReadOnly = true,
+        AllowUserToAddRows = false,
+        AllowUserToResizeRows = false,
+        AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+        BackgroundColor = Color.FromArgb(245, 245, 245),
+        RowTemplate = new DataGridViewRow { Height = 22 },
+    };
+
     public MainForm()
     {
         _config = AppConfig.Load(out string? loadError);
@@ -62,12 +94,24 @@ public class MainForm : Form
         _scheduler.StatusChanged += OnSchedulerStatus;
         _scheduler.PhaseChanged += OnPhaseChanged;
 
+        // 统计：日志行喂给解析器；解析结果/会话重置回 UI
+        _scheduler.Log += line => _statsParser.Feed(line);
+        _statsParser.RoundUpdated += OnRoundUpdated;
+        _statsParser.SessionReset += OnSessionReset;
+
         if (loadError != null)
             AppendLog(loadError);
         AutoFindExe();
 
-        // 首帧渲染后再启动监听，避免构造期间 BeginInvoke
-        Shown += (_, _) => _scheduler.Initialize();
+        // 首帧渲染后再启动监听/布局，避免构造期间 BeginInvoke
+        Shown += OnShown;
+    }
+
+    private void OnShown(object? sender, EventArgs e)
+    {
+        // 日志区占 60%、统计区占 40%（用户可拖拽调整）
+        _split.SplitterDistance = Math.Max(_split.Height * 3 / 5, 100);
+        _scheduler.Initialize();
     }
 
     // ==================== UI 构建 ====================
@@ -121,11 +165,48 @@ public class MainForm : Form
         opPanel.Controls.Add(_btnStop, 2, 0);
         opPanel.Controls.Add(_btnStart, 3, 0);
 
+        // —— 统计面板（汇总行 + 表格）——
+        var statsPanel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            Padding = new Padding(8, 2, 8, 6),
+        };
+        statsPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        statsPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        statsPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        statsPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        statsPanel.Controls.Add(_lblSummary, 0, 0);
+        statsPanel.Controls.Add(_btnClearStats, 1, 0);
+        statsPanel.Controls.Add(_gridStats, 0, 1);
+        statsPanel.SetColumnSpan(_gridStats, 2);
+
+        // 日志 / 统计上下分栏（可拖拽；SplitterDistance 在 Shown 后按实际高度分配）
+        _split.Panel1.Controls.Add(_txtLog);
+        _split.Panel2.Controls.Add(statsPanel);
+
         // Dock 添加顺序：先 Fill，再 Top
-        Controls.Add(_txtLog);
+        Controls.Add(_split);
         Controls.Add(opPanel);
         Controls.Add(paramPanel);
+
+        // 统计表格列
+        _gridStats.Columns.AddRange(
+            MakeGridCol("时间"),
+            MakeGridCol("输入tokens"),
+            MakeGridCol("输入速度(t/s)"),
+            MakeGridCol("输出tokens"),
+            MakeGridCol("输出速度(t/s)"),
+            MakeGridCol("命中率(accepted/generated)"),
+            MakeGridCol("f_sim_best"),
+            MakeGridCol("总耗时(s)"));
     }
+
+    private static DataGridViewTextBoxColumn MakeGridCol(string header) => new()
+    {
+        HeaderText = header,
+        SortMode = DataGridViewColumnSortMode.NotSortable,
+    };
 
     private static Label MakeLabel(string text) => new Label
     {
@@ -219,6 +300,7 @@ public class MainForm : Form
         };
 
         _btnClearLog.Click += (_, _) => _txtLog.Clear();
+        _btnClearStats.Click += (_, _) => _statsParser.Reset();
         _btnStart.Click += OnStartClick;
         _btnStop.Click += (_, _) =>
         {
@@ -278,11 +360,90 @@ public class MainForm : Form
         BeginInvoke(() => _lblStatus.Text = text);
     }
 
-    /// <summary>阶段切换（非 UI 线程）→ 控件启停 + 状态颜色。</summary>
+    /// <summary>阶段切换（非 UI 线程）→ 控件启停 + 状态颜色；唤醒 = 新会话，清空统计。</summary>
     private void OnPhaseChanged(SmartScheduler.Phase phase)
     {
+        // llama-server 重启后 task ID 从 0 重新计数，必须重置解析器防跨会话 ID 冲突
+        if (phase == SmartScheduler.Phase.Waking)
+            _statsParser.Reset();
         if (!IsHandleCreated) return;
         BeginInvoke(() => ApplyPhase(phase));
+    }
+
+    // ==================== 统计 ====================
+
+    /// <summary>一轮统计更新（进程输出线程）→ 表格行增量刷新 + 汇总。</summary>
+    private void OnRoundUpdated(LlamaStatsParser.RoundStats s)
+    {
+        if (!IsHandleCreated) return;
+        BeginInvoke(() =>
+        {
+            var row = FindStatRow(s.Id);
+            if (row == null)
+            {
+                int idx = _gridStats.Rows.Add();
+                row = _gridStats.Rows[idx];
+                row.Tag = s.Id;
+            }
+            FillStatRow(row, s);
+            UpdateSummary();
+        });
+    }
+
+    /// <summary>会话重置（解析器线程）→ 清空表格。</summary>
+    private void OnSessionReset()
+    {
+        if (!IsHandleCreated) return;
+        BeginInvoke(() =>
+        {
+            _gridStats.Rows.Clear();
+            _lblSummary.Text = "请求: 0";
+        });
+    }
+
+    private DataGridViewRow? FindStatRow(long id)
+    {
+        foreach (DataGridViewRow r in _gridStats.Rows)
+        {
+            if (r.Tag is long tag && tag == id) return r;
+        }
+        return null;
+    }
+
+    private static void FillStatRow(DataGridViewRow row, LlamaStatsParser.RoundStats s)
+    {
+        row.Cells[0].Value = s.Time.ToString("HH:mm:ss");
+        row.Cells[1].Value = s.PromptTokens.ToString();
+        row.Cells[2].Value = s.PromptSpeed.ToString("F1");
+        row.Cells[3].Value = s.EvalTokens.ToString();
+        row.Cells[4].Value = s.EvalSpeed.ToString("F1");
+        row.Cells[5].Value = s.HasDraft
+            ? $"{s.DraftAccepted}/{s.DraftGenerated} ({(s.DraftGenerated > 0 ? s.DraftAccepted * 100.0 / s.DraftGenerated : 0):F1}%)"
+            : "—";
+        row.Cells[6].Value = s.FSimBest?.ToString("F3") ?? "—";
+        row.Cells[7].Value = (s.TotalMs / 1000.0).ToString("F2");
+    }
+
+    /// <summary>累计汇总：请求数、总 tokens、平均速度、加权命中率。</summary>
+    private void UpdateSummary()
+    {
+        var rounds = _statsParser.GetRounds();
+        if (rounds.Count == 0)
+        {
+            _lblSummary.Text = "请求: 0";
+            return;
+        }
+        double inTok = rounds.Sum(r => r.PromptTokens);
+        double outTok = rounds.Sum(r => r.EvalTokens);
+        // 平均速度按总时长加权（= 总tokens ÷ 总时间），比逐行算术平均更准确
+        double inMs = rounds.Sum(r => r.PromptMs);
+        double outMs = rounds.Sum(r => r.EvalMs);
+        long acc = rounds.Where(r => r.HasDraft).Sum(r => r.DraftAccepted);
+        long gen = rounds.Where(r => r.HasDraft).Sum(r => r.DraftGenerated);
+        _lblSummary.Text = $"请求: {rounds.Count} | " +
+            $"输入: {(long)inTok} tokens @ {(inMs > 0 ? inTok / (inMs / 1000.0) : 0):F1} t/s | " +
+            $"输出: {(long)outTok} tokens @ {(outMs > 0 ? outTok / (outMs / 1000.0) : 0):F1} t/s | " +
+            (gen > 0 ? $"命中率: {acc}/{gen} ({acc * 100.0 / gen:F1}%)" : "命中率: —");
     }
 
     private void ApplyPhase(SmartScheduler.Phase phase)
