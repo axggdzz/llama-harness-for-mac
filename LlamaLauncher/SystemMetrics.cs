@@ -70,8 +70,8 @@ public sealed class SystemMetrics
         return ((ms.ullTotalPhys - ms.ullAvailPhys) / gb, ms.ullTotalPhys / gb);
     }
 
-    /// <summary>GPU 显存（"已用MB/总量MB"）；无 nvidia-smi 或查询失败返回 null。</summary>
-    public string? GetVramText()
+    /// <summary>GPU 显存（"已用MB/总量MB"）；无 nvidia-smi 或查询失败/挂起返回 null。</summary>
+    public async Task<string?> GetVramTextAsync()
     {
         if (!_nvSmiChecked)
         {
@@ -89,7 +89,15 @@ public sealed class SystemMetrics
                 Arguments = "--query-gpu=memory.used,memory.total --format=csv,noheader,nounits",
             };
             using var p = Process.Start(psi)!;
-            string? line = p.StandardOutput.ReadLine();
+            // nvidia-smi 可能挂起（驱动忙）：3 秒超时放弃本轮并杀进程，防线程堆积
+            var lineTask = p.StandardOutput.ReadLineAsync();
+            var finished = await Task.WhenAny(lineTask, Task.Delay(3000));
+            if (finished != lineTask)
+            {
+                try { p.Kill(); } catch { }
+                return null;
+            }
+            string? line = await lineTask;
             p.WaitForExit(5000);
             if (string.IsNullOrWhiteSpace(line)) return null;
             var parts = line.Split(',', 2);
