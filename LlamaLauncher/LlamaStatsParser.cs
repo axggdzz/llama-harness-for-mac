@@ -42,13 +42,14 @@ public sealed class LlamaStatsParser
     /// <summary>会话重置后触发（清空全部记录）。</summary>
     public event Action? SessionReset;
 
-    // —— 正则（基于实测日志格式，前缀不敏感）——
-    private static readonly Regex TaskIdRe = new(@"print_timing:\s+id\s+\d+\s+task\s+(\d+)");
+    // —— 正则（兼容两种实测格式：旧 "id 0 task 0" / 新 "id 0 | task 0 |"，前缀不敏感）——
+    private static readonly Regex TaskIdRe = new(@"print_timing:\s+id\s+\d+\s*(?:\|)?\s*task\s+(\d+)");
     private static readonly Regex PromptRe = new(@"prompt eval time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*tokens");
     // 负向后顾排除 "prompt eval time"，避免误匹配
     private static readonly Regex EvalRe = new(@"(?<!prompt )eval time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*tokens");
     private static readonly Regex TotalRe = new(@"total time\s*=\s*([\d.]+)\s*ms");
-    private static readonly Regex DraftRe = new(@"draft acceptance\s*=\s*[\d.]*\s*(\d+)\s*accepted\s*/\s*(\d+)\s*generated");
+    // draft acceptance 兼容 "= 0.65 52 accepted / 80 generated"（旧）与 "= 0.75 (30 accepted / 40 generated)"（新）
+    private static readonly Regex DraftRe = new(@"draft acceptance\s*=\s*[\d.]*\s*\(?\s*(\d+)\s*accepted\s*/\s*(\d+)\s*generated");
     // f_sim_best 为定制构建字段：取其后第一个数值，位置不敏感（单独成行或嵌在其他行均可）
     private static readonly Regex FSimBestRe = new(@"f_sim_best\D*?(-?\d+(?:\.\d+)?)");
 
