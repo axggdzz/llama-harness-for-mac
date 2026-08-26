@@ -12,9 +12,9 @@ public class MainForm : Form
 
     // —— 参数控件 ——
     private readonly TextBox _txtExe = new() { Dock = DockStyle.Fill };
-    private readonly Button _btnBrowseExe = new() { Text = "浏览…", Dock = DockStyle.Right, AutoSize = true };
+    private readonly Button _btnBrowseExe = new() { Text = "浏览…", Size = new Size(100, 32) };
     private readonly TextBox _txtModel = new() { Dock = DockStyle.Fill };
-    private readonly Button _btnBrowseModel = new() { Text = "浏览…", Dock = DockStyle.Right, AutoSize = true };
+    private readonly Button _btnBrowseModel = new() { Text = "浏览…", Size = new Size(100, 32) };
     private readonly NumericUpDown _numPort = new() { Minimum = 1, Maximum = 65534, Dock = DockStyle.Fill };
     private readonly NumericUpDown _numCtx = new() { Minimum = 256, Maximum = 1_048_576, Dock = DockStyle.Fill };
     private readonly NumericUpDown _numNgl = new() { Minimum = 0, Maximum = 999, Dock = DockStyle.Fill };
