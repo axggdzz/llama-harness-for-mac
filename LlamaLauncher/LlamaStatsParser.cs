@@ -36,6 +36,8 @@ public sealed class LlamaStatsParser
     private readonly object _gate = new();
     private readonly Dictionary<int, RoundStats> _byTask = new();
     private long _idCounter;
+    // f_sim_best 出现在 print_timing 之前的槽位选择行（get_availabl），归属给下一个新 task
+    private double? _pendingFsim;
 
     /// <summary>一轮统计被创建或更新时触发（可能来自非 UI 线程）。</summary>
     public event Action<RoundStats>? RoundUpdated;
@@ -53,10 +55,21 @@ public sealed class LlamaStatsParser
     // f_sim_best 为定制构建字段：取其后第一个数值，位置不敏感（单独成行或嵌在其他行均可）
     private static readonly Regex FSimBestRe = new(@"f_sim_best\D*?(-?\d+(?:\.\d+)?)");
 
-    /// <summary>喂入一行进程输出；属于 print_timing 块时更新对应轮次。</summary>
+    /// <summary>喂入一行进程输出；print_timing 块更新对应轮次，槽位选择行暂存 f_sim_best。</summary>
     public void Feed(string line)
     {
-        if (!line.Contains("print_timing", StringComparison.Ordinal)) return; // 快速路径：跳过绝大多数行
+        bool isTiming = line.Contains("print_timing", StringComparison.Ordinal);
+
+        // f_sim_best 出现在 print_timing 之前的槽位选择行（如 get_availabl），暂存给下一个新 task
+        if (!isTiming && FSimBestRe.IsMatch(line))
+        {
+            lock (_gate)
+            {
+                _pendingFsim = ParseD(FSimBestRe.Match(line).Groups[1].Value);
+            }
+            return;
+        }
+        if (!isTiming) return; // 快速路径：跳过绝大多数行
 
         RoundStats? round = null;
         lock (_gate)
@@ -69,6 +82,9 @@ public sealed class LlamaStatsParser
                 {
                     round = new RoundStats { Id = ++_idCounter, TaskId = taskId, Time = DateTime.Now };
                     _byTask[taskId] = round;
+                    // 新 task 继承暂存的 f_sim_best（时间线上它出现在本请求启动之前）
+                    round.FSimBest = _pendingFsim;
+                    _pendingFsim = null;
                 }
             }
             if (round != null)
@@ -84,6 +100,7 @@ public sealed class LlamaStatsParser
         lock (_gate)
         {
             _byTask.Clear();
+            _pendingFsim = null;
         }
         SessionReset?.Invoke();
     }
