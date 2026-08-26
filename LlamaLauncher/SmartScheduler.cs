@@ -186,9 +186,12 @@ public sealed class SmartScheduler : IDisposable
         {
             // 首请求排队等待唤醒完成（共享同一唤醒任务，防多进程冲突）
             await EnsureRunningAsync();
-            Touch();                       // 唤醒就绪：开始/刷新闲置倒计时
+            // 只有真实推理请求才刷新闲置计时；探测类请求（GET /v1/models、健康检查等）
+            // 不算使用——否则 Agent 周期性轮询会把倒计时无限续命，导致永不休眠
+            bool isInference = IsInferenceRequest(req);
+            if (isInference) Touch();
             await ForwardAsync(ctx);       // 代理转发到后端 llama-server（流式直通）
-            Touch();                       // 请求完成：再次刷新倒计时
+            if (isInference) Touch();      // 请求完成：再次刷新倒计时
         }
         catch (Exception ex)
         {
@@ -235,6 +238,11 @@ public sealed class SmartScheduler : IDisposable
             Log?.Invoke($"唤醒 llama-server：{Path.GetFileName(exe)} {args}");
 
             _server.Start(exe, args, Path.GetDirectoryName(Path.GetFullPath(exe))!);
+
+            // 13900F 纯大核绑定：按配置掩码绑定 P 核（留空 = 禁用）
+            string? affinityDesc = CpuAffinity.Apply(_server.Current, _cfg.PCoreMask);
+            Log?.Invoke(affinityDesc != null ? $"P核绑定生效：{affinityDesc}" : "P核绑定已禁用（掩码为空或无效）。");
+
             await WaitReadyAsync(srvPort);
 
             Touch();
@@ -316,10 +324,21 @@ public sealed class SmartScheduler : IDisposable
         outResp.Close();
     }
 
+    /// <summary>判断是否为真实推理请求（刷新闲置计时）：POST + completions/embeddings 路径。</summary>
+    private static bool IsInferenceRequest(HttpListenerRequest req)
+    {
+        if (!string.Equals(req.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase)) return false;
+        var p = req.Url?.AbsolutePath ?? "";
+        return p.Contains("completion", StringComparison.OrdinalIgnoreCase)
+            || p.Contains("embedding", StringComparison.OrdinalIgnoreCase);
+    }
+
     // ==================== 闲置休眠（15 分钟无请求自动释放） ====================
 
     /// <summary>刷新闲置倒计时基准点。</summary>
     private void Touch() => _lastTouch = DateTime.Now;
+
+    private int _tickCount;
 
     private void OnTick(object? _)
     {
@@ -328,9 +347,15 @@ public sealed class SmartScheduler : IDisposable
         var remaining = _lastTouch.Add(TimeSpan.FromMinutes(IdleMinutes)) - DateTime.Now;
         if (remaining <= TimeSpan.Zero && inflight == 0)
             SleepNow();
+        else if (inflight > 0)
+            // 有在途任务时不触发休眠，明确提示原因（长驻 SSE 流式连接会一直压制休眠）
+            RaiseStatus($"运行中 · {inflight} 个在途任务，休眠暂停");
         else
-            // 有在途任务时不触发休眠；状态栏显示剩余时间
             RaiseStatus($"运行中 · {(int)remaining.TotalMinutes:D2}:{remaining.Seconds:D2} 无请求后自动休眠");
+
+        // P 核亲和性自愈：每 5 秒检查一次，被系统重置时自动重绑
+        if (++_tickCount % 5 == 0 && CpuAffinity.Heal(_server.Current, _cfg.PCoreMask))
+            Log?.Invoke("检测到 CPU 亲和性被重置，已重新绑定 P 核。");
     }
 
     /// <summary>安全停机：仅当无在途任务时执行；Kill 整个进程树，杜绝残留。</summary>

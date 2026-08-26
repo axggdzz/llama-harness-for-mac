@@ -24,6 +24,7 @@ public class MainForm : Form
     private readonly TextBox _txtExtra = new() { Dock = DockStyle.Fill };
     private readonly CheckBox _chkAuto = new() { Text = "智能按需模式（代理监听 + 闲置自动休眠，推荐）", Dock = DockStyle.Fill };
     private readonly NumericUpDown _numIdleMin = new() { Minimum = 1, Maximum = 120, Dock = DockStyle.Fill };
+    private readonly TextBox _txtPcoreMask = new() { Dock = DockStyle.Fill }; // P 核亲和性掩码（十六进制，留空禁用）
 
     // —— 操作区 ——
     // 所有按钮统一尺寸 100x32（与浏览按钮一致）；不用 Dock，Dock 会覆盖固定 Size
@@ -178,6 +179,7 @@ public class MainForm : Form
         AddRow(paramPanel, MakeLabel("线程数（-t）："), _numThreads, null);
         AddRow(paramPanel, MakeLabel("附加参数（可选）："), _txtExtra, null);
         AddRow(paramPanel, MakeLabel("闲置休眠分钟数："), _numIdleMin, null);
+        AddRow(paramPanel, MakeLabel("P核掩码（十六进制，13900F=0x0000FFFF，留空禁用）："), _txtPcoreMask, null);
         AddRow(paramPanel, MakeLabel("模式："), _chkAuto, null);
 
         // 操作区
@@ -275,6 +277,7 @@ public class MainForm : Form
         _txtExtra.Text = _config.ExtraArgs;
         _chkAuto.Checked = _config.AutoMode;
         _numIdleMin.Value = Math.Clamp(_config.IdleMinutes, (int)_numIdleMin.Minimum, (int)_numIdleMin.Maximum);
+        _txtPcoreMask.Text = _config.PCoreMask;
     }
 
     /// <summary>UI → 共享配置对象（内存同步；持久化时机：唤醒成功 / 模式切换 / 关闭）。</summary>
@@ -291,6 +294,7 @@ public class MainForm : Form
         _config.ExtraArgs = _txtExtra.Text.Trim();
         _config.AutoMode = _chkAuto.Checked;
         _config.IdleMinutes = (int)_numIdleMin.Value;
+        _config.PCoreMask = _txtPcoreMask.Text.Trim();
     }
 
     /// <summary>自动查找 llama-server.exe：配置路径无效时用搜索结果回填。</summary>
@@ -352,6 +356,7 @@ public class MainForm : Form
         _chkNoKv.CheckedChanged += OnParamEdited;
         _numThreads.ValueChanged += OnParamEdited;
         _txtExtra.TextChanged += OnParamEdited;
+        _txtPcoreMask.TextChanged += OnParamEdited;
         _numIdleMin.ValueChanged += OnIdleEdited;
         _chkAuto.CheckedChanged += OnAutoModeEdited;
 
@@ -510,7 +515,7 @@ public class MainForm : Form
         {
             _txtExe, _btnBrowseExe, _txtModel, _btnBrowseModel,
             _numPort, _numCtx, _numNgl, _numParallel, _chkNoKv, _numThreads, _txtExtra,
-            _chkAuto, _numIdleMin,
+            _chkAuto, _numIdleMin, _txtPcoreMask,
         };
         foreach (var c in paramControls)
             c.Enabled = !busy;

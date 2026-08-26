@@ -12,6 +12,9 @@ public sealed class LlamaServerProcess : IDisposable
     /// <summary>当前是否还有存活的进程。</summary>
     public bool IsRunning => _proc is { HasExited: false };
 
+    /// <summary>当前 Process 对象（未启动或已清理时为 null），供外部设置亲和性等。</summary>
+    public Process? Current => _proc;
+
     /// <summary>输出一行日志（stdout/stderr），可能来自非 UI 线程。</summary>
     public event Action<string>? OutputLine;
 

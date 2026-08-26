@@ -20,6 +20,8 @@ public class AppConfig
     public string ExtraArgs { get; set; } = "";
     public bool AutoMode { get; set; } = true;       // 智能按需模式：代理监听 8080 + 按需唤醒 + 闲置休眠
     public int IdleMinutes { get; set; } = 15;       // 无请求自动休眠分钟数
+    // P 核亲和性掩码（十六进制）：13900F 本机 P 核 = 逻辑 CPU 0–15；留空 = 禁用绑定
+    public string PCoreMask { get; set; } = "0x0000FFFF";
 
     private static string ConfigPath => Path.Combine(AppContext.BaseDirectory, "config.json");
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
