@@ -67,7 +67,8 @@ public sealed class LlamaStatsParser
         bool isTiming = line.Contains("print_timing", StringComparison.Ordinal);
 
         // f_sim_best 出现在 print_timing 之前的槽位选择行（如 get_availabl），暂存给下一个新 task
-        if (!isTiming && FSimBestRe.IsMatch(line))
+        // Contains 前置检查：绝大多数行不含该子串，避免对每行跑正则
+        if (!isTiming && line.Contains("f_sim_best", StringComparison.Ordinal) && FSimBestRe.IsMatch(line))
         {
             lock (_gate)
             {

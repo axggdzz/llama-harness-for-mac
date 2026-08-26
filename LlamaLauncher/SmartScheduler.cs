@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 
 namespace LlamaLauncher;
 
@@ -30,7 +31,11 @@ public sealed class SmartScheduler : IDisposable
     private DateTime _lastTouch = DateTime.MinValue;
     private int _phase;                          // Phase 索引，统一经 Volatile.Read/Write 访问
     private int _backendPort;                    // 实际运行时后端端口（自动探测空闲）
+    private int _tickCount;                      // 秒级 tick 计数（定时器周期 1s），用于周期性自愈检查
     private readonly System.Collections.Generic.Queue<string> _recentOutput = new(); // 进程输出末几行，用于失败诊断
+
+    /// <summary>P 核亲和性自愈检查间隔（tick 数，定时器周期 1s）：每 5 秒核对一次绑定是否被系统重置。</summary>
+    private const int AffinityHealEveryTicks = 5;
 
     /// <summary>日志行（可能来自任意线程），UI 侧负责 BeginInvoke</summary>
     public event Action<string>? Log;
@@ -55,7 +60,9 @@ public sealed class SmartScheduler : IDisposable
     /// <summary>首选后端端口 = 前端端口 + 1；若被占用则向上探测空闲端口。</summary>
     private int PreferredBackendPort => Math.Min(_cfg.Port + 1, 65535);
 
-    /// <summary>从 preferred 开始向上扫描，返回第一个可绑定的空闲端口（规避 Hyper-V/WSL2 动态端口保留）。</summary>
+    /// <summary>从 preferred 开始向上扫描，返回第一个可绑定的空闲端口（规避 Hyper-V/WSL2 动态端口保留）。
+    /// 注意：探测与 llama-server 实际绑定之间存在极小的 TOCTOU 窗口；若该窗口内端口被抢占，
+    /// llama-server 绑定失败会自行退出，WaitReadyAsync 检测到进程退出并上报失败，下次唤醒重新探测——本机单用户场景可接受。</summary>
     private static int PickFreePort(int preferred)
     {
         var upper = Math.Min(preferred + 32, 65535);
@@ -231,6 +238,7 @@ public sealed class SmartScheduler : IDisposable
     /// </summary>
     private async Task WakeUpAsync()
     {
+        _nonStreamWarned = 0; // 新会话：非流式告警重新计数
         SetPhase(Phase.Waking);
         RaiseStatus("唤醒中…（正在加载模型）");
         try
@@ -243,7 +251,25 @@ public sealed class SmartScheduler : IDisposable
             // 智能模式下自动探测空闲后端端口，规避 Hyper-V/WSL2 动态端口保留导致的绑定失败
             int srvPort = AutoMode ? PickFreePort(PreferredBackendPort) : _cfg.Port;
             _backendPort = srvPort;
-            var args = LlamaFinder.BuildArgs(_cfg, srvPort);
+
+            // P 核掩码生效时线程数不得超过掩码绑定的核数，否则超订降速
+            int threads = _cfg.Threads;
+            var pcoreMask = CpuAffinity.ParseMask(_cfg.PCoreMask);
+            if (pcoreMask != null)
+            {
+                int coreCount = System.Numerics.BitOperations.PopCount((ulong)pcoreMask.Value); // 掩码恒为正，转 ulong 安全
+                if (threads > coreCount)
+                {
+                    Log?.Invoke($"注意：线程数 {threads} 超出 P 核掩码的 {coreCount} 核，本次启动钳制为 {coreCount}（超订会降速）。建议调整线程数参数。");
+                    threads = coreCount;
+                }
+            }
+
+            // --host 使后端监听非本机地址：绕过代理闲置休眠逻辑并把模型暴露到局域网
+            if (_cfg.ExtraArgs.Contains("--host", StringComparison.OrdinalIgnoreCase))
+                Log?.Invoke("警告：附加参数含 --host，后端可能监听非本机地址，将暴露到局域网并绕过闲置休眠。建议移除。");
+
+            var args = LlamaFinder.BuildArgs(_cfg, srvPort, threads);
             Log?.Invoke($"唤醒 llama-server：{Path.GetFileName(exe)} {args}");
 
             _server.Start(exe, args, Path.GetDirectoryName(Path.GetFullPath(exe))!);
@@ -257,7 +283,9 @@ public sealed class SmartScheduler : IDisposable
             Touch();
             SetPhase(Phase.Running);
             Log?.Invoke("llama-server 就绪，进入保活状态。");
-            _cfg.Save(); // 唤醒成功：持久化当前参数
+            // 唤醒成功：持久化当前参数
+            if (!_cfg.Save(out string? saveErr))
+                Log?.Invoke($"警告：配置持久化失败（{saveErr}），下次启动不会恢复本次参数。");
         }
         catch (Exception)
         {
@@ -303,10 +331,50 @@ public sealed class SmartScheduler : IDisposable
         var req = ctx.Request;
         var uri = new Uri($"http://localhost:{_backendPort}{req.RawUrl}");
 
-        using var msg = new HttpRequestMessage(new HttpMethod(req.HttpMethod), uri)
+        // 读取完整请求体（非流式检测 / 强制流式改写需要）；GET 无请求体
+        byte[]? bodyBytes = null;
+        if (string.Equals(req.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase))
         {
-            Content = new StreamContent(req.InputStream),
-        };
+            using var ms = new MemoryStream();
+            await req.InputStream.CopyToAsync(ms);
+            bodyBytes = ms.ToArray();
+        }
+
+        // 非流式请求检测 + 可选强制流式改写（仅 completions/embeddings 推理请求）：
+        // 非流式时 llama-server 会缓存整个响应直到生成完毕才返回，期间无任何字节流动，
+        // 客户端读超时→断开→agent 重试全量上下文→重新预填。流式则边生成边发字节，不会读超时。
+        if (bodyBytes != null && bodyBytes.Length > 0)
+        {
+            var p = req.Url?.AbsolutePath ?? "";
+            bool isCompletions = p.Contains("completion", StringComparison.OrdinalIgnoreCase)
+                                 || p.Contains("embedding", StringComparison.OrdinalIgnoreCase);
+            if (isCompletions)
+            {
+                var body = System.Text.Encoding.UTF8.GetString(bodyBytes);
+                bool streaming = System.Text.RegularExpressions.Regex.IsMatch(body, @"""stream""\s*:\s*true");
+                if (!streaming)
+                {
+                    if (_cfg.ForceStream)
+                    {
+                        bodyBytes = System.Text.Encoding.UTF8.GetBytes(EnsureStreamTrue(body));
+                        Log?.Invoke("强制流式：已将非流式请求改写为 stream=true（SSE 直通）。");
+                    }
+                    else
+                    {
+                        WarnNonStreamOnce();
+                    }
+                }
+            }
+        }
+
+        using var msg = new HttpRequestMessage(new HttpMethod(req.HttpMethod), uri);
+        if (bodyBytes != null)
+        {
+            msg.Content = new ByteArrayContent(bodyBytes);
+            // Content-Type 走内容头，避免与消息级头重复
+            if (!string.IsNullOrEmpty(req.ContentType))
+                msg.Content.Headers.ContentType = new MediaTypeHeaderValue(req.ContentType);
+        }
         foreach (string key in req.Headers)
         {
             // Host / 长度 / 编码类头由 HttpClient 自行处理，避免冲突
@@ -314,6 +382,7 @@ public sealed class SmartScheduler : IDisposable
             if (key.Equals("Content-Length", StringComparison.OrdinalIgnoreCase)) continue;
             if (key.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase)) continue;
             if (key.Equals("Connection", StringComparison.OrdinalIgnoreCase)) continue;
+            if (key.Equals("Content-Type", StringComparison.OrdinalIgnoreCase)) continue; // 已在内容头上显式设置
             try
             {
                 msg.Headers.TryAddWithoutValidation(key, req.Headers[key]);
@@ -324,13 +393,26 @@ public sealed class SmartScheduler : IDisposable
             }
         }
 
-        var resp = await _hc.SendAsync(msg, HttpCompletionOption.ResponseHeadersRead);
+        using var resp = await _hc.SendAsync(msg, HttpCompletionOption.ResponseHeadersRead);
         var outResp = ctx.Response;
         outResp.StatusCode = (int)resp.StatusCode;
         var ct = resp.Content.Headers.ContentType?.ToString();
         outResp.ContentType = string.IsNullOrEmpty(ct) ? "application/octet-stream" : ct!;
-        await resp.Content.CopyToAsync(outResp.OutputStream);
-        outResp.Close();
+        try
+        {
+            await resp.Content.CopyToAsync(outResp.OutputStream);
+        }
+        catch (Exception)
+        {
+            // 客户端断开/写入失败：方法退出时 dispose resp 关闭后端连接，
+            // llama-server 检测到断开会取消任务并保留部分槽位 KV（f_keep），释放 GPU。
+            // 多 agent 模式下这是预期行为（agent 超时/重试），非致命错误。
+            Log?.Invoke("客户端断开，已中止本次生成（多 agent 下属正常重试）。");
+        }
+        finally
+        {
+            outResp.Close();
+        }
     }
 
     /// <summary>判断是否为真实推理请求（刷新闲置计时）：POST + completions/embeddings 路径。</summary>
@@ -342,12 +424,33 @@ public sealed class SmartScheduler : IDisposable
             || p.Contains("embedding", StringComparison.OrdinalIgnoreCase);
     }
 
+    private int _nonStreamWarned; // 每会话只告警一次，唤醒时重置
+
+    /// <summary>非流式推理请求告警（每会话一次）：非流式是"断开→全量重填"循环的常见诱因。</summary>
+    private void WarnNonStreamOnce()
+    {
+        if (Interlocked.Increment(ref _nonStreamWarned) == 1)
+            Log?.Invoke("警告：检测到非流式推理请求。llama-server 会阻塞整个生成后才返回，客户端读超时可能触发断开→重试全量重新预填。" +
+                        "建议：Agent 侧启用流式（stream=true）或加大请求超时；也可在启动器开启「强制流式」。");
+    }
+
+    /// <summary>把非流式请求体改写为 stream=true："stream":false 直接替换；无 stream 字段则注入到最后一个 '}' 前。</summary>
+    public static string EnsureStreamTrue(string json)
+    {
+        if (System.Text.RegularExpressions.Regex.IsMatch(json, @"""stream""\s*:\s*false"))
+            return System.Text.RegularExpressions.Regex.Replace(json, @"""stream""\s*:\s*false", @"""stream"":true");
+        int idx = json.LastIndexOf('}');
+        if (idx <= 0) return json;
+        var prefix = json.Substring(0, idx).TrimEnd();
+        bool hasComma = prefix.EndsWith(',');
+        string field = "\"stream\":true";
+        return $"{json.Substring(0, idx)}{(hasComma ? "" : ",")}{field}{json.Substring(idx)}";
+    }
+
     // ==================== 闲置休眠（15 分钟无请求自动释放） ====================
 
     /// <summary>刷新闲置倒计时基准点。</summary>
     private void Touch() => _lastTouch = DateTime.Now;
-
-    private int _tickCount;
 
     private void OnTick(object? _)
     {
@@ -363,7 +466,7 @@ public sealed class SmartScheduler : IDisposable
             RaiseStatus($"运行中 · {(int)remaining.TotalMinutes:D2}:{remaining.Seconds:D2} 无请求后自动休眠");
 
         // P 核亲和性自愈：每 5 秒检查一次，被系统重置时自动重绑
-        if (++_tickCount % 5 == 0 && CpuAffinity.Heal(_server.Current, _cfg.PCoreMask))
+        if (++_tickCount % AffinityHealEveryTicks == 0 && CpuAffinity.Heal(_server.Current, _cfg.PCoreMask))
             Log?.Invoke("检测到 CPU 亲和性被重置，已重新绑定 P 核。");
     }
 

@@ -65,9 +65,11 @@ public static class LlamaFinder
     /// <summary>
     /// 拼接 llama-server 完整命令行参数。
     /// 模板：-m &lt;model&gt; --port &lt;p&gt; -c &lt;c&gt; -ngl &lt;n&gt; --parallel &lt;np&gt; [--no-kv-unified] -t &lt;t&gt; [附加参数]
-    /// portOverride 用于智能模式下后端端口（前端端口 + 1）。
+    /// portOverride 用于智能模式下后端端口（前端端口 + 1）；
+    /// threadsOverride 用于 P 核掩码生效时钳制线程数（防超订）。
+    /// 附加参数原样拼入（不做再解析），含空格的值需用户自行加引号，见 AppConfig.ExtraArgs。
     /// </summary>
-    public static string BuildArgs(AppConfig cfg, int? portOverride = null)
+    public static string BuildArgs(AppConfig cfg, int? portOverride = null, int? threadsOverride = null)
     {
         var sb = new StringBuilder();
         sb.Append($"-m \"{cfg.ModelPath}\"");
@@ -77,8 +79,9 @@ public static class LlamaFinder
         sb.Append($" --parallel {cfg.Parallel}");
         if (cfg.NoKvUnified)
             sb.Append(" --no-kv-unified");
-        if (cfg.Threads > 0)
-            sb.Append($" -t {cfg.Threads}");
+        int threads = threadsOverride ?? cfg.Threads;
+        if (threads > 0)
+            sb.Append($" -t {threads}");
         if (!string.IsNullOrWhiteSpace(cfg.ExtraArgs))
             sb.Append(' ').Append(cfg.ExtraArgs.Trim());
         return sb.ToString();

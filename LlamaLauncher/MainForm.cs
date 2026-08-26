@@ -25,12 +25,16 @@ public class MainForm : Form
     private readonly CheckBox _chkAuto = new() { Text = "智能按需模式（代理监听 + 闲置自动休眠，推荐）", Dock = DockStyle.Fill };
     private readonly NumericUpDown _numIdleMin = new() { Minimum = 1, Maximum = 120, Dock = DockStyle.Fill };
     private readonly TextBox _txtPcoreMask = new() { Dock = DockStyle.Fill }; // P 核亲和性掩码（十六进制，留空禁用）
+    private readonly CheckBox _chkForceStream = new() { Text = "将非流式请求改写为 stream=true", Dock = DockStyle.Fill };
+    private readonly ToolTip _tooltip = new(); // 提示气泡（附加参数引号说明），须为字段保持存活
 
     // —— 操作区 ——
     // 所有按钮统一尺寸 100x32（与浏览按钮一致）；不用 Dock，Dock 会覆盖固定 Size
     private readonly Button _btnStart = new() { Text = "启动 / 唤醒", Size = new Size(100, 32) };
     private readonly Button _btnStop = new() { Text = "停止", Size = new Size(100, 32), Enabled = false };
     private readonly Button _btnClearLog = new() { Text = "清空日志", Size = new Size(100, 32) };
+    private readonly Button _btnExportCfg = new() { Text = "保存配置到…", Size = new Size(100, 32) };
+    private readonly Button _btnImportCfg = new() { Text = "载入配置", Size = new Size(100, 32) };
     private readonly Label _lblStatus = new() { Text = "空闲", Dock = DockStyle.Fill, ForeColor = Color.Gray };
 
     // —— 系统资源统计（操作行下方，2 秒轮询）——
@@ -46,6 +50,7 @@ public class MainForm : Form
         Margin = new Padding(8, 0, 8, 4),
     };
     private readonly System.Windows.Forms.Timer _metricsTimer = new() { Interval = 2000 };
+    private int _metricsBusy; // 0=空闲 1=采样中（防重叠：nvidia-smi 可能耗时数秒）
 
     // —— 日志区 ——
     private readonly TextBox _txtLog = new()
@@ -102,6 +107,7 @@ public class MainForm : Form
 
         BuildUi();
         LoadConfigToUi();
+        UpdatePortControlState(); // 智能模式下监听器占用端口，禁止编辑
         WireEvents();
 
         // 调度器事件 → UI（内部统一 BeginInvoke）
@@ -134,17 +140,25 @@ public class MainForm : Form
         _metricsTimer.Start();
     }
 
-    /// <summary>每 2 秒刷新资源标签。nvidia-smi 查询可能阻塞数百毫秒，放后台线程执行。</summary>
+    /// <summary>每 2 秒刷新资源标签。nvidia-smi 查询可能阻塞数百毫秒，放后台线程执行；同一时刻仅一个未完成采样，防线程堆积。</summary>
     private void OnMetricsTick(object? sender, EventArgs e)
     {
-        Task.Run(() =>
+        if (Interlocked.Exchange(ref _metricsBusy, 1) == 1) return; // 上一轮还在跑，跳过本轮
+        Task.Run(async () =>
         {
-            double cpu = _metrics.GetCpuPercent();
-            var (used, total) = _metrics.GetMemory();
-            string? vram = _metrics.GetVramText();
-            if (IsDisposed) return; // 窗口已关闭，丢弃本轮结果
-            BeginInvoke(() => _lblRes.Text =
-                $"CPU: {cpu:F0}%   |   内存: {used:F1}/{total:F1} GB   |   显存: {(vram ?? "—（未检测到 nvidia-smi）")}");
+            try
+            {
+                double cpu = _metrics.GetCpuPercent();
+                var (used, total) = _metrics.GetMemory();
+                string? vram = await _metrics.GetVramTextAsync();
+                if (IsDisposed) return; // 窗口已关闭，丢弃本轮结果
+                BeginInvoke(() => _lblRes.Text =
+                    $"CPU: {cpu:F0}%   |   内存: {used:F1}/{total:F1} GB   |   显存: {(vram ?? "—（未检测到 nvidia-smi）")}");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _metricsBusy, 0);
+            }
         });
     }
 
@@ -178,27 +192,33 @@ public class MainForm : Form
         AddRow(paramPanel, MakeLabel("--no-kv-unified："), _chkNoKv, null);
         AddRow(paramPanel, MakeLabel("线程数（-t）："), _numThreads, null);
         AddRow(paramPanel, MakeLabel("附加参数（可选）："), _txtExtra, null);
+        // 附加参数原样拼入命令行，含空格的值需用户自行加引号
+        _tooltip.SetToolTip(_txtExtra, "原样拼入命令行，不做再解析；含空格的路径需加引号，例如：--mmproj \"D:\\path\\projector.gguf\"");
         AddRow(paramPanel, MakeLabel("闲置休眠分钟数："), _numIdleMin, null);
         AddRow(paramPanel, MakeLabel("P核掩码（十六进制，13900F=0x0000FFFF，留空禁用）："), _txtPcoreMask, null);
+        AddRow(paramPanel, MakeLabel("强制流式："), _chkForceStream, null);
+        // 仅当客户端能解析 SSE 流时才开启；标准 OpenAI SDK 客户端期望 JSON，开启会破坏解析
+        _tooltip.SetToolTip(_chkForceStream, "把非流式推理请求改写为 stream=true 并直通 SSE。防客户端读超时→断开→全量重填。仅适用于能解析 SSE 流的客户端；标准 OpenAI SDK 客户端勿开。");
         AddRow(paramPanel, MakeLabel("模式："), _chkAuto, null);
 
         // 操作区
         var opPanel = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
-            ColumnCount = 4,
+            ColumnCount = 6,
             Padding = new Padding(8, 6, 8, 6),
             AutoSize = true,
         };
         opPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        opPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        opPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        opPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        for (int i = 0; i < 5; i++)
+            opPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         opPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         opPanel.Controls.Add(_lblStatus, 0, 0);
         opPanel.Controls.Add(_btnClearLog, 1, 0);
-        opPanel.Controls.Add(_btnStop, 2, 0);
-        opPanel.Controls.Add(_btnStart, 3, 0);
+        opPanel.Controls.Add(_btnExportCfg, 2, 0);   // 清空日志旁：保存配置到…
+        opPanel.Controls.Add(_btnImportCfg, 3, 0);  // 载入配置
+        opPanel.Controls.Add(_btnStop, 4, 0);
+        opPanel.Controls.Add(_btnStart, 5, 0);
 
         // —— 统计面板（汇总行 + 表格）——
         var statsPanel = new TableLayoutPanel
@@ -264,21 +284,28 @@ public class MainForm : Form
 
     // ==================== 配置 <-> UI ====================
 
-    private void LoadConfigToUi()
+    private void LoadConfigToUi() => WriteConfigToUi(_config);
+
+    /// <summary>把配置对象写入全部 UI 控件（启动时 / 载入配置文件共用）。</summary>
+    private void WriteConfigToUi(AppConfig cfg)
     {
-        _txtExe.Text = _config.ExePath;
-        _txtModel.Text = _config.ModelPath;
-        _numPort.Value = Math.Clamp(_config.Port, (int)_numPort.Minimum, (int)_numPort.Maximum);
-        _numCtx.Value = Math.Clamp(_config.CtxSize, (int)_numCtx.Minimum, (int)_numCtx.Maximum);
-        _numNgl.Value = Math.Clamp(_config.Ngl, (int)_numNgl.Minimum, (int)_numNgl.Maximum);
-        _numParallel.Value = Math.Clamp(_config.Parallel, (int)_numParallel.Minimum, (int)_numParallel.Maximum);
-        _chkNoKv.Checked = _config.NoKvUnified;
-        _numThreads.Value = Math.Clamp(_config.Threads, (int)_numThreads.Minimum, (int)_numThreads.Maximum);
-        _txtExtra.Text = _config.ExtraArgs;
-        _chkAuto.Checked = _config.AutoMode;
-        _numIdleMin.Value = Math.Clamp(_config.IdleMinutes, (int)_numIdleMin.Minimum, (int)_numIdleMin.Maximum);
-        _txtPcoreMask.Text = _config.PCoreMask;
+        _txtExe.Text = cfg.ExePath;
+        _txtModel.Text = cfg.ModelPath;
+        _numPort.Value = Math.Clamp(cfg.Port, (int)_numPort.Minimum, (int)_numPort.Maximum);
+        _numCtx.Value = Math.Clamp(cfg.CtxSize, (int)_numCtx.Minimum, (int)_numCtx.Maximum);
+        _numNgl.Value = Math.Clamp(cfg.Ngl, (int)_numNgl.Minimum, (int)_numNgl.Maximum);
+        _numParallel.Value = Math.Clamp(cfg.Parallel, (int)_numParallel.Minimum, (int)_numParallel.Maximum);
+        _chkNoKv.Checked = cfg.NoKvUnified;
+        _numThreads.Value = Math.Clamp(cfg.Threads, (int)_numThreads.Minimum, (int)_numThreads.Maximum);
+        _txtExtra.Text = cfg.ExtraArgs;
+        _chkAuto.Checked = cfg.AutoMode;
+        _numIdleMin.Value = Math.Clamp(cfg.IdleMinutes, (int)_numIdleMin.Minimum, (int)_numIdleMin.Maximum);
+        _txtPcoreMask.Text = cfg.PCoreMask;
+        _chkForceStream.Checked = cfg.ForceStream;
     }
+
+    /// <summary>智能模式下监听器占用前端端口，改端口需重绑，监听中禁止编辑。</summary>
+    private void UpdatePortControlState() => _numPort.Enabled = !_config.AutoMode;
 
     /// <summary>UI → 共享配置对象（内存同步；持久化时机：唤醒成功 / 模式切换 / 关闭）。</summary>
     private void SyncUiToConfig()
@@ -295,6 +322,7 @@ public class MainForm : Form
         _config.AutoMode = _chkAuto.Checked;
         _config.IdleMinutes = (int)_numIdleMin.Value;
         _config.PCoreMask = _txtPcoreMask.Text.Trim();
+        _config.ForceStream = _chkForceStream.Checked;
     }
 
     /// <summary>自动查找 llama-server.exe：配置路径无效时用搜索结果回填。</summary>
@@ -339,6 +367,8 @@ public class MainForm : Form
 
         _btnClearLog.Click += (_, _) => _txtLog.Clear();
         _btnClearStats.Click += (_, _) => _statsParser.Reset();
+        _btnExportCfg.Click += OnExportConfigClick;
+        _btnImportCfg.Click += OnImportConfigClick;
         _btnStart.Click += OnStartClick;
         _btnStop.Click += (_, _) =>
         {
@@ -357,6 +387,7 @@ public class MainForm : Form
         _numThreads.ValueChanged += OnParamEdited;
         _txtExtra.TextChanged += OnParamEdited;
         _txtPcoreMask.TextChanged += OnParamEdited;
+        _chkForceStream.CheckedChanged += OnParamEdited;
         _numIdleMin.ValueChanged += OnIdleEdited;
         _chkAuto.CheckedChanged += OnAutoModeEdited;
 
@@ -375,7 +406,9 @@ public class MainForm : Form
     {
         SyncUiToConfig();
         _scheduler.SetAutoMode(_config.AutoMode);
-        _config.Save();
+        UpdatePortControlState();
+        if (!_config.Save(out string? err))
+            AppendLog($"警告：配置保存失败：{err}");
     }
 
     private async void OnStartClick(object? sender, EventArgs e)
@@ -388,6 +421,66 @@ public class MainForm : Form
         catch (Exception ex)
         {
             MessageBox.Show(this, $"启动失败：\n{ex.Message}", "错误",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    // ==================== 配置导出 / 导入（独立 json 文件） ====================
+
+    /// <summary>保存配置到…：把当前窗口全部配置项序列化到用户选择的 json 文件。</summary>
+    private void OnExportConfigClick(object? sender, EventArgs e)
+    {
+        SyncUiToConfig();
+        using var dlg = new SaveFileDialog
+        {
+            Title = "保存配置到…",
+            Filter = "JSON 配置文件 (*.json)|*.json",
+            FileName = "llama-launcher-config.json",
+        };
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            File.WriteAllText(dlg.FileName,
+                System.Text.Json.JsonSerializer.Serialize(_config,
+                    new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            AppendLog($"配置已保存到：{dlg.FileName}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"保存失败：\n{ex.Message}", "错误",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    /// <summary>载入配置：读取 json 文件，校验后写入当前窗口全部配置项。</summary>
+    private void OnImportConfigClick(object? sender, EventArgs e)
+    {
+        using var dlg = new OpenFileDialog
+        {
+            Title = "载入配置",
+            Filter = "JSON 配置文件 (*.json)|*.json",
+        };
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            var cfg = System.Text.Json.JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(dlg.FileName))
+                ?? throw new InvalidOperationException("反序列化结果为空");
+
+            // 数值兜底：与 AppConfig.Load 相同规则，防止越界值
+            if (cfg.Port is < 1 or > 65534) cfg.Port = 8080;
+            if (cfg.CtxSize <= 0) cfg.CtxSize = 262144;
+            if (cfg.Ngl < 0) cfg.Ngl = 999;
+            if (cfg.Parallel <= 0) cfg.Parallel = 1;
+            if (cfg.Threads <= 0) cfg.Threads = Environment.ProcessorCount;
+            if (cfg.IdleMinutes <= 0) cfg.IdleMinutes = 15;
+
+            WriteConfigToUi(cfg);   // 写入全部 UI 控件
+            SyncUiToConfig();       // UI → 共享配置对象（下次唤醒即生效）
+            AppendLog($"配置已载入：{dlg.FileName}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"载入失败：\n{ex.Message}", "错误",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
@@ -443,6 +536,7 @@ public class MainForm : Form
             var row = FindStatRow(s.Id);
             if (row != null)
                 _gridStats.Rows.Remove(row);
+            UpdateSummary(); // 行被淘汰后刷新汇总，保持请求数/合计与表格一致
         });
     }
 
@@ -515,10 +609,14 @@ public class MainForm : Form
         {
             _txtExe, _btnBrowseExe, _txtModel, _btnBrowseModel,
             _numPort, _numCtx, _numNgl, _numParallel, _chkNoKv, _numThreads, _txtExtra,
-            _chkAuto, _numIdleMin, _txtPcoreMask,
+            _chkAuto, _numIdleMin, _txtPcoreMask, _chkForceStream,
+            _btnExportCfg, _btnImportCfg, // 运行中禁止导入/导出，避免改参冲突
         };
         foreach (var c in paramControls)
             c.Enabled = !busy;
+        // 智能模式下监听器占用端口，改端口需重绑，监听中禁止编辑
+        if (_config.AutoMode)
+            _numPort.Enabled = false;
 
         _lblStatus.ForeColor = phase switch
         {
@@ -547,15 +645,20 @@ public class MainForm : Form
             _scheduler.StopNow();
         }
         SyncUiToConfig();
-        _config.Save();
+        if (!_config.Save(out string? err))
+            AppendLog($"警告：配置保存失败：{err}");
         _scheduler.Dispose();
     }
 
     // ==================== 日志 ====================
 
+    /// <summary>日志字符上限（约数万行）：防止长期运行无限增长拖慢 UI。</summary>
+    private const int MaxLogChars = 400_000;
+
     /// <summary>追加一行带时间戳的日志并自动滚到底部。可来自任意线程。</summary>
     private void AppendLog(string line)
     {
+        LogFile.Append(line); // 文件持久化（完整日期时间戳，独立于 UI 生命周期）
         var entry = $"[{DateTime.Now:HH:mm:ss}] {line}{Environment.NewLine}";
         if (!IsHandleCreated)
         {
@@ -565,6 +668,8 @@ public class MainForm : Form
         BeginInvoke(() =>
         {
             _txtLog.AppendText(entry);
+            if (_txtLog.TextLength > MaxLogChars)
+                _txtLog.Text = _txtLog.Text.Substring(_txtLog.TextLength / 2); // 仅保留最近一半
             // TextBox 无 ScrollToEnd，用选中位置滚动到末尾
             _txtLog.SelectionStart = _txtLog.TextLength;
             _txtLog.SelectionLength = 0;

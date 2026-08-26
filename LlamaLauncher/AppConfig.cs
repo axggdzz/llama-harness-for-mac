@@ -17,11 +17,15 @@ public class AppConfig
     public int Parallel { get; set; } = 1;       // --parallel 并发序列（黄金底参）
     public bool NoKvUnified { get; set; } = true;// --no-kv-unified（黄金底参）
     public int Threads { get; set; } = Environment.ProcessorCount; // -t 线程数
+    /// <summary>附加参数：原样拼入命令行（不做再解析）；含空格的路径需自行加引号，如 --mmproj "D:\a b\projector.gguf"。</summary>
     public string ExtraArgs { get; set; } = "";
     public bool AutoMode { get; set; } = true;       // 智能按需模式：代理监听 8080 + 按需唤醒 + 闲置休眠
     public int IdleMinutes { get; set; } = 15;       // 无请求自动休眠分钟数
     // P 核亲和性掩码（十六进制）：13900F 本机 P 核 = 逻辑 CPU 0–15；留空 = 禁用绑定
     public string PCoreMask { get; set; } = "0x0000FFFF";
+    // 强制流式：把非流式推理请求改写为 stream=true（SSE 直通），防客户端读超时→断开→全量重填。
+    // 仅适用于能解析 SSE 流的客户端；标准 OpenAI SDK 客户端勿开。
+    public bool ForceStream { get; set; } = false;
 
     private static string ConfigPath => Path.Combine(AppContext.BaseDirectory, "config.json");
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
@@ -40,7 +44,7 @@ public class AppConfig
                 throw new InvalidOperationException("反序列化结果为空");
 
             // 数值兜底：越界时回退黄金默认值
-            if (cfg.Port is < 1 or > 65535) cfg.Port = 8080;
+            if (cfg.Port is < 1 or > 65534) cfg.Port = 8080; // 上限 65534：智能模式后端端口 = Port+1，65535 会与前端端口冲突
             if (cfg.CtxSize <= 0) cfg.CtxSize = 262144;
             if (cfg.Ngl < 0) cfg.Ngl = 999;
             if (cfg.Parallel <= 0) cfg.Parallel = 1;
@@ -55,16 +59,20 @@ public class AppConfig
         }
     }
 
-    /// <summary>保存配置到程序目录，返回是否成功。</summary>
-    public bool Save()
+    /// <summary>保存配置到程序目录（临时文件 + 重命名原子写入，防半截文件损坏），返回是否成功。</summary>
+    public bool Save(out string? error)
     {
+        error = null;
         try
         {
-            File.WriteAllText(ConfigPath, JsonSerializer.Serialize(this, JsonOpts));
+            var tmp = ConfigPath + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(this, JsonOpts));
+            File.Move(tmp, ConfigPath, overwrite: true);
             return true;
         }
-        catch
+        catch (Exception ex)
         {
+            error = ex.Message;
             return false;
         }
     }
