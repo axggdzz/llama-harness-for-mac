@@ -1,0 +1,126 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+namespace LlamaLauncher;
+
+/// <summary>
+/// 系统资源采样（只读，无副作用）：
+/// - CPU 占用：GetSystemTimes 两次采样取差值（kernel 时间含 idle，busy = (kernel-idle) + user）
+/// - 内存：GlobalMemoryStatusEx 取物理内存已用/总量
+/// - 显存：nvidia-smi 查询（NVIDIA 卡；找不到工具时返回 null，UI 显示 "—"）
+/// </summary>
+public sealed class SystemMetrics
+{
+    private static class Native
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct FILETIME { public uint lo; public uint hi; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MEMORYSTATUSEX
+        {
+            public uint dwLength;
+            public uint dwMemoryLoad;
+            public ulong ullTotalPhys;
+            public ulong ullAvailPhys;
+            public ulong ullTotalPageFile;
+            public ulong ullAvailPageFile;
+            public ulong ullTotalVirtual;
+            public ulong ullAvailVirtual;
+            public ulong ullAvailExtendedCommit;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool GetSystemTimes(out FILETIME idle, out FILETIME kernel, out FILETIME user);
+
+        [DllImport("kernel32.dll")]
+        public static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX pbs);
+    }
+
+    private ulong _prevIdle, _prevKernel, _prevUser;
+    private bool _hasSample;
+    private string? _nvSmiPath;      // 启动时解析一次，找不到则显存恒为 null
+    private bool _nvSmiChecked;
+
+    /// <summary>整机 CPU 占用百分比（基于上次调用的差值）。</summary>
+    public double GetCpuPercent()
+    {
+        if (!Native.GetSystemTimes(out var idle, out var kernel, out var user)) return 0;
+        ulong i = ToU64(idle), k = ToU64(kernel), u = ToU64(user);
+        double pct = 0;
+        if (_hasSample)
+        {
+            ulong idleDelta = i - _prevIdle;
+            ulong kernelDelta = k - _prevKernel; // kernel 时间包含 idle
+            ulong userDelta = u - _prevUser;
+            ulong busy = (kernelDelta > idleDelta ? kernelDelta - idleDelta : 0) + userDelta;
+            ulong total = busy + idleDelta;
+            pct = total > 0 ? 100.0 * busy / total : 0;
+        }
+        _prevIdle = i; _prevKernel = k; _prevUser = u; _hasSample = true;
+        return pct;
+    }
+
+    /// <summary>物理内存（已用 GB, 总量 GB）。</summary>
+    public (double usedGb, double totalGb) GetMemory()
+    {
+        var ms = new Native.MEMORYSTATUSEX { dwLength = (uint)Marshal.SizeOf<Native.MEMORYSTATUSEX>() };
+        if (!Native.GlobalMemoryStatusEx(ref ms)) return (0, 0);
+        const double gb = 1073741824.0; // 1024^3
+        return ((ms.ullTotalPhys - ms.ullAvailPhys) / gb, ms.ullTotalPhys / gb);
+    }
+
+    /// <summary>GPU 显存（"已用MB/总量MB"）；无 nvidia-smi 或查询失败返回 null。</summary>
+    public string? GetVramText()
+    {
+        if (!_nvSmiChecked)
+        {
+            _nvSmiPath = ResolveNvidiaSmi();
+            _nvSmiChecked = true;
+        }
+        if (_nvSmiPath == null) return null;
+        try
+        {
+            var psi = new ProcessStartInfo(_nvSmiPath)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                Arguments = "--query-gpu=memory.used,memory.total --format=csv,noheader,nounits",
+            };
+            using var p = Process.Start(psi)!;
+            string? line = p.StandardOutput.ReadLine();
+            p.WaitForExit(5000);
+            if (string.IsNullOrWhiteSpace(line)) return null;
+            var parts = line.Split(',', 2);
+            if (parts.Length < 2) return null;
+            return $"{parts[0].Trim()}/{parts[1].Trim()} MB";
+        }
+        catch
+        {
+            return null; // nvidia-smi 异常（驱动未就绪等），UI 显示 "—"
+        }
+    }
+
+    /// <summary>在 PATH 和系统目录中查找 nvidia-smi.exe。</summary>
+    private static string? ResolveNvidiaSmi()
+    {
+        var pathVar = Environment.GetEnvironmentVariable("PATH") ?? "";
+        foreach (var dir in pathVar.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            try
+            {
+                var c = Path.Combine(dir.Trim(), "nvidia-smi.exe");
+                if (File.Exists(c)) return c;
+            }
+            catch
+            {
+                // 非法路径跳过
+            }
+        }
+        var sys = @"C:\Windows\System32\nvidia-smi.exe";
+        return File.Exists(sys) ? sys : null;
+    }
+
+    private static ulong ToU64(Native.FILETIME ft) => ((ulong)ft.hi << 32) | ft.lo;
+}

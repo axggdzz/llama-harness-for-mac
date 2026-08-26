@@ -31,6 +31,17 @@ public class MainForm : Form
     private readonly Button _btnClearLog = new() { Text = "清空日志", Dock = DockStyle.Right, AutoSize = true };
     private readonly Label _lblStatus = new() { Text = "空闲", Dock = DockStyle.Fill, ForeColor = Color.Gray };
 
+    // —— 系统资源统计（操作行下方，2 秒轮询）——
+    private readonly SystemMetrics _metrics = new();
+    private readonly Label _lblRes = new()
+    {
+        Dock = DockStyle.Fill,
+        TextAlign = ContentAlignment.MiddleLeft,
+        ForeColor = Color.DimGray,
+        Margin = new Padding(8, 0, 8, 4),
+    };
+    private readonly System.Windows.Forms.Timer _metricsTimer = new() { Interval = 2000 };
+
     // —— 日志区 ——
     private readonly TextBox _txtLog = new()
     {
@@ -112,6 +123,24 @@ public class MainForm : Form
         // 日志区占 60%、统计区占 40%（用户可拖拽调整）
         _split.SplitterDistance = Math.Max(_split.Height * 3 / 5, 100);
         _scheduler.Initialize();
+
+        // 资源轮询：CPU 需两次采样取差值，首次 tick 建立基准
+        _metricsTimer.Tick += OnMetricsTick;
+        _metricsTimer.Start();
+    }
+
+    /// <summary>每 2 秒刷新资源标签。nvidia-smi 查询可能阻塞数百毫秒，放后台线程执行。</summary>
+    private void OnMetricsTick(object? sender, EventArgs e)
+    {
+        Task.Run(() =>
+        {
+            double cpu = _metrics.GetCpuPercent();
+            var (used, total) = _metrics.GetMemory();
+            string? vram = _metrics.GetVramText();
+            if (IsDisposed) return; // 窗口已关闭，丢弃本轮结果
+            BeginInvoke(() => _lblRes.Text =
+                $"CPU: {cpu:F0}%   |   内存: {used:F1}/{total:F1} GB   |   显存: {(vram ?? "—（未检测到 nvidia-smi）")}");
+        });
     }
 
     // ==================== UI 构建 ====================
@@ -185,8 +214,9 @@ public class MainForm : Form
         _split.Panel1.Controls.Add(_txtLog);
         _split.Panel2.Controls.Add(statsPanel);
 
-        // Dock 添加顺序：先 Fill，再 Top
+        // Dock 添加顺序：先 Fill，再 Top（Top 控件按添加顺序自下而上堆叠）
         Controls.Add(_split);
+        Controls.Add(_lblRes);   // 资源行：位于操作行下方
         Controls.Add(opPanel);
         Controls.Add(paramPanel);
 
@@ -475,6 +505,7 @@ public class MainForm : Form
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
+        _metricsTimer.Stop();
         if (_scheduler.CurrentPhase is SmartScheduler.Phase.Running
             or SmartScheduler.Phase.Waking
             or SmartScheduler.Phase.Sleeping)
