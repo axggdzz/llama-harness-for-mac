@@ -9,6 +9,10 @@ namespace LlamaLauncher;
 /// </summary>
 public class AppConfig
 {
+    /// <summary>C-104：配置 schema 版本号；后续格式变更时递增并做迁移兼容（旧文件缺该字段时反序列化取默认值 1）。</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("schema_version")]
+    public int SchemaVersion { get; set; } = 1;
+
     public string ExePath { get; set; } = "";
     public string ModelPath { get; set; } = "";
     public int Port { get; set; } = 8080;

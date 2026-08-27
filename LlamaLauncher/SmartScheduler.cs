@@ -49,6 +49,11 @@ public sealed class SmartScheduler : IDisposable
     public event Action<string>? StatusChanged;
     /// <summary>阶段切换（可能来自任意线程）</summary>
     public event Action<Phase>? PhaseChanged;
+    /// <summary>C-007：进入 Waking 阶段时触发，UI 据此重置统计解析器（职责下沉到调度器内部，不再依赖 UI 自行监听 PhaseChanged）。</summary>
+    public event Action? StatsReset;
+
+    // C-102 运行统计埋点
+    private int _wakeCount, _sleepCount, _inflightPeak;
 
     public bool AutoMode { get; set; } = true;
     public int IdleMinutes { get; set; } = 15;
@@ -156,18 +161,42 @@ public sealed class SmartScheduler : IDisposable
 
     private async Task AcceptLoopAsync()
     {
+        int failures = 0;
         while (_listener.IsListening)
         {
-            HttpListenerContext ctx;
+            HttpListenerContext? ctx = null;
+            bool got = false;
             try
             {
                 ctx = await _listener.GetContextAsync();
+                got = true;
+                failures = 0;
             }
-            catch
+            catch (Exception ex)
             {
-                return; // 监听器已停止
+                // C-008：运行期监听异常（端口抢占/睡眠唤醒/权限变更）——记录 + 有限次数重试
+                if (!_listener.IsListening) return; // 正常停止，静默退出
+                Log?.Invoke($"错误：监听异常（{ex.Message}），尝试重新监听…");
+                if (++failures >= 3)
+                {
+                    RaiseStatus("监听失败：端口不可用，请检查端口后重启智能模式。");
+                    return;
+                }
+                await Task.Delay(2000);
+                try
+                {
+                    _listener.Stop();
+                    _listener.Start();
+                    Log?.Invoke("监听已重新建立。");
+                }
+                catch (Exception ex2)
+                {
+                    Log?.Invoke($"错误：重新监听失败：{ex2.Message}");
+                    RaiseStatus("监听失败：端口不可用，请检查端口后重启智能模式。");
+                    return;
+                }
             }
-            _ = HandleRequestAsync(ctx);
+            if (got && ctx != null) _ = HandleRequestAsync(ctx); // 仅成功取到请求时处理；重试后回到循环顶部
         }
     }
 
@@ -181,9 +210,12 @@ public sealed class SmartScheduler : IDisposable
         var reqPath = req.Url?.AbsolutePath;
         if (string.Equals(reqPath, "/__status__", StringComparison.OrdinalIgnoreCase))
         {
+            // C-103：附加最近日志快照，供外部 Agent 程序远程诊断
+            var logs = RecentOutput().Split('\n');
+            var logArr = string.Join(",", logs.Select(l => "\"" + JsonEscape(l.TrimEnd('\r')) + "\""));
             await WriteJsonAsync(ctx, 200,
                 $"{{\"phase\":\"{(int)CurrentPhase}\",\"inflight\":{Volatile.Read(ref _inflight)},\"backend_port\":{_backendPort}," +
-                $"\"idle_minutes\":{IdleMinutes}}}");
+                $"\"idle_minutes\":{IdleMinutes},\"recent_logs\":[{logArr}]}}");
             return;
         }
 
@@ -205,7 +237,8 @@ public sealed class SmartScheduler : IDisposable
             return;
         }
 
-        Interlocked.Increment(ref _inflight);
+        int cur = Interlocked.Increment(ref _inflight);
+        if (cur > Volatile.Read(ref _inflightPeak)) Volatile.Write(ref _inflightPeak, cur); // C-102 峰值记录
         try
         {
             // 首请求排队等待唤醒完成（共享同一唤醒任务，防多进程冲突）
@@ -247,8 +280,10 @@ public sealed class SmartScheduler : IDisposable
     private async Task WakeUpAsync()
     {
         _nonStreamWarned = 0; // 新会话：非流式告警重新计数
+        StatsReset?.Invoke();   // C-007：进入 Waking 即重置统计（llama-server task ID 从 0 重计），不再依赖 UI 调用
         SetPhase(Phase.Waking);
         RaiseStatus("唤醒中…（正在加载模型）");
+        var wakeStart = DateTime.Now; // C-102：唤醒耗时计时
         try
         {
             var exe = LlamaFinder.Find(_cfg.ExePath)
@@ -290,7 +325,10 @@ public sealed class SmartScheduler : IDisposable
 
             Touch();
             SetPhase(Phase.Running);
-            Log?.Invoke("llama-server 就绪，进入保活状态。");
+            // C-102：唤醒统计埋点（累计次数 + 本次耗时）
+            Interlocked.Increment(ref _wakeCount);
+            var elapsed = (DateTime.Now - wakeStart).TotalSeconds;
+            Log?.Invoke($"llama-server 就绪，进入保活状态。（唤醒 #{Volatile.Read(ref _wakeCount)}，本次耗时 {elapsed:F1}s）");
             // 唤醒成功：持久化当前参数
             if (!_cfg.Save(out string? saveErr))
                 Log?.Invoke($"警告：配置持久化失败（{saveErr}），下次启动不会恢复本次参数。");
@@ -308,7 +346,9 @@ public sealed class SmartScheduler : IDisposable
         }
     }
 
-    /// <summary>轮询后端 /v1/models 直至就绪（最长 5 分钟），期间进程退出立即报错。</summary>
+    /// <summary>轮询后端 /v1/models 直至就绪（最长 5 分钟），期间进程退出立即报错。
+    /// C-003：不仅校验 HTTP 200，还校验响应内容含 "object":"list" 模型列表特征——
+    /// 防 TOCTOU 窗口内其他程序抢占后端端口时被误判为 llama-server 就绪。</summary>
     private async Task WaitReadyAsync(int srvPort)
     {
         var url = $"http://localhost:{srvPort}/v1/models";
@@ -319,7 +359,12 @@ public sealed class SmartScheduler : IDisposable
             {
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
                 using var r = await _hc.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cts.Token);
-                if (r.IsSuccessStatusCode) return;
+                if (r.IsSuccessStatusCode)
+                {
+                    var body = await r.Content.ReadAsStringAsync(cts.Token);
+                    // 内容特征校验：llama-server /v1/models 返回 {"object":"list",...}
+                    if (body.Contains("\"object\":\"list\"")) return;
+                }
             }
             catch
             {
@@ -364,8 +409,17 @@ public sealed class SmartScheduler : IDisposable
                 {
                     if (_cfg.ForceStream)
                     {
-                        bodyBytes = System.Text.Encoding.UTF8.GetBytes(EnsureStreamTrue(body));
-                        Log?.Invoke("强制流式：已将非流式请求改写为 stream=true（SSE 直通）。");
+                        var rewritten = EnsureStreamTrue(body);
+                        if (rewritten != null)
+                        {
+                            bodyBytes = System.Text.Encoding.UTF8.GetBytes(rewritten);
+                            Log?.Invoke("强制流式：已将非流式请求改写为 stream=true（SSE 直通）。");
+                        }
+                        else
+                        {
+                            // C-005 降级：改写失败（非法 JSON）时透传原始请求，禁止下发损坏 JSON
+                            Log?.Invoke("警告：强制流式改写失败（请求体不是合法 JSON），已透传原始请求。");
+                        }
                     }
                     else
                     {
@@ -456,13 +510,29 @@ public sealed class SmartScheduler : IDisposable
                         "建议：Agent 侧启用流式（stream=true）或加大请求超时；也可在启动器开启「强制流式」。");
     }
 
-    /// <summary>把非流式请求体改写为 stream=true："stream":false 直接替换；无 stream 字段则注入到最后一个 '}' 前。</summary>
-    public static string EnsureStreamTrue(string json)
+    /// <summary>把非流式请求体改写为 stream=true。
+    /// C-005：优先 System.Text.Json DOM 解析修改（正确处理字符串内含 '}'、注释、格式化 JSON）；
+    /// DOM 失败回退字符串 hack；两者都失败返回 null，调用方透传原始请求。</summary>
+    public static string? EnsureStreamTrue(string json)
     {
+        try
+        {
+            var node = System.Text.Json.Nodes.JsonNode.Parse(json);
+            if (node is System.Text.Json.Nodes.JsonObject obj)
+            {
+                obj["stream"] = true;
+                return obj.ToJsonString();
+            }
+        }
+        catch
+        {
+            // DOM 解析失败（非法 JSON），走字符串降级
+        }
+        // 降级：字符串级修改（"stream":false 直接替换；无 stream 字段注入到最后一个 '}' 前）
         if (System.Text.RegularExpressions.Regex.IsMatch(json, @"""stream""\s*:\s*false"))
             return System.Text.RegularExpressions.Regex.Replace(json, @"""stream""\s*:\s*false", @"""stream"":true");
         int idx = json.LastIndexOf('}');
-        if (idx <= 0) return json;
+        if (idx <= 0) return null;
         var prefix = json.Substring(0, idx).TrimEnd();
         bool hasComma = prefix.EndsWith(',');
         string field = "\"stream\":true";
@@ -500,7 +570,8 @@ public sealed class SmartScheduler : IDisposable
             if (CurrentPhase != Phase.Running) return;
             SetPhase(Phase.Sleeping);
         }
-        Log?.Invoke($"{IdleMinutes} 分钟无请求，自动休眠，正在释放显存…");
+        Interlocked.Increment(ref _sleepCount); // C-102：休眠计数
+        Log?.Invoke($"{IdleMinutes} 分钟无请求，自动休眠（累计 #{Volatile.Read(ref _sleepCount)}，inflight 峰值 {Volatile.Read(ref _inflightPeak)}），正在释放显存…");
         RaiseStatus("闲置超时，正在释放显存…");
         _server.Stop(); // Exited 事件将把状态拉回 Standby
     }
@@ -511,10 +582,21 @@ public sealed class SmartScheduler : IDisposable
         var p = CurrentPhase;
         if (p == Phase.Sleeping || p == Phase.Running)
         {
+            bool wasSleep = p == Phase.Sleeping;
             SetPhase(Phase.Standby);
             Log?.Invoke($"llama-server 已退出（退出码 {code}），显存已释放，回到监听待机。");
             RaiseStatus(AutoMode ? "已休眠，继续监听待机。" : "已停止。");
+            if (wasSleep) _ = VerifyVramReleasedAsync(); // C-006：休眠后校验显存是否真正回落
         }
+    }
+
+    /// <summary>C-006：休眠 Kill 进程树后延迟读显存；未回落到待机水平则告警（衍生子进程孤儿残留）。</summary>
+    private async Task VerifyVramReleasedAsync()
+    {
+        await Task.Delay(3000); // 等 GPU 驱动回收显存稳定
+        var mb = await SystemMetrics.GetVramUsedMbAsync();
+        if (mb is > 1024)
+            Log?.Invoke($"警告：休眠后显存占用仍为 {mb} MB（预期接近 0），疑似 llama-server 衍生子进程残留，请在任务管理器中检查。");
     }
 
     // ==================== 对外控制接口 ====================
@@ -590,6 +672,10 @@ public sealed class SmartScheduler : IDisposable
         await resp.OutputStream.WriteAsync(buf);
         resp.Close();
     }
+
+    /// <summary>JSON 字符串转义（recent_logs 快照用）。</summary>
+    private static string JsonEscape(string s) =>
+        s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r");
 
     private static void WriteError(HttpListenerContext ctx, int code, string msg)
     {

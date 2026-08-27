@@ -95,6 +95,8 @@ public sealed class SystemMetrics
             if (finished != lineTask)
             {
                 try { p.Kill(); } catch { }
+                // C-004：Kill 后必须 WaitForExit 回收进程对象，防长期运行句柄缓慢泄漏
+                p.WaitForExit(3000);
                 return null;
             }
             string? line = await lineTask;
@@ -107,6 +109,40 @@ public sealed class SystemMetrics
         catch
         {
             return null; // nvidia-smi 异常（驱动未就绪等），UI 显示 "—"
+        }
+    }
+
+    /// <summary>C-006：查询 GPU 已用显存（MB），供休眠后校验显存是否释放；nvidia-smi 不可用/失败返回 null。</summary>
+    public static async Task<int?> GetVramUsedMbAsync()
+    {
+        try
+        {
+            var path = ResolveNvidiaSmi();
+            if (path == null) return null;
+            var psi = new ProcessStartInfo(path)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                Arguments = "--query-gpu=memory.used --format=csv,noheader,nounits",
+            };
+            using var p = Process.Start(psi)!;
+            var lineTask = p.StandardOutput.ReadLineAsync();
+            var finished = await Task.WhenAny(lineTask, Task.Delay(3000));
+            if (finished != lineTask)
+            {
+                try { p.Kill(); } catch { }
+                p.WaitForExit(3000); // C-004：Kill 后回收进程对象
+                return null;
+            }
+            string? line = await lineTask;
+            p.WaitForExit(5000);
+            var v = line?.Trim().Split(',')[0]?.Trim();
+            return int.TryParse(v, out var mb) ? mb : null;
+        }
+        catch
+        {
+            return null;
         }
     }
 

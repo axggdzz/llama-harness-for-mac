@@ -114,6 +114,8 @@ public class MainForm : Form
         _scheduler.Log += AppendLog;
         _scheduler.StatusChanged += OnSchedulerStatus;
         _scheduler.PhaseChanged += OnPhaseChanged;
+        // C-007：统计重置由调度器状态机驱动（Waking 时自动触发），不再依赖 UI 监听 PhaseChanged
+        _scheduler.StatsReset += () => _statsParser.Reset();
 
         // 统计：日志行喂给解析器；解析结果/会话重置回 UI
         _scheduler.Log += line => _statsParser.Feed(line);
