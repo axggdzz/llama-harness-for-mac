@@ -655,10 +655,10 @@ public class MainForm : Form
     /// <summary>日志字符上限（约数万行）：防止长期运行无限增长拖慢 UI。</summary>
     private const int MaxLogChars = 400_000;
 
-    /// <summary>追加一行带时间戳的日志并自动滚到底部。可来自任意线程。</summary>
+    /// <summary>追加一行带时间戳的日志并按级别着色（正常绿/警告黄/错误红），自动滚到底部。可来自任意线程。</summary>
     private void AppendLog(string line)
     {
-        LogFile.Append(line); // 文件持久化（完整日期时间戳，独立于 UI 生命周期）
+        LogFile.Append(line); // 文件持久化 + 轮切 + 警告/错误独立输出
         var entry = $"[{DateTime.Now:HH:mm:ss}] {line}{Environment.NewLine}";
         if (!IsHandleCreated)
         {
@@ -670,6 +670,16 @@ public class MainForm : Form
             _txtLog.AppendText(entry);
             if (_txtLog.TextLength > MaxLogChars)
                 _txtLog.Text = _txtLog.Text.Substring(_txtLog.TextLength / 2); // 仅保留最近一半
+            // 选中刚追加的行（截断后按长度回推起点）并着色
+            int start = Math.Max(0, _txtLog.TextLength - entry.Length);
+            _txtLog.SelectionStart = start;
+            _txtLog.SelectionLength = entry.Length;
+            _txtLog.ForeColor = LogFile.Classify(line) switch
+            {
+                LogFile.Level.Warn => Color.Gold,
+                LogFile.Level.Error => Color.Red,
+                _ => Color.LightGreen,
+            };
             // TextBox 无 ScrollToEnd，用选中位置滚动到末尾
             _txtLog.SelectionStart = _txtLog.TextLength;
             _txtLog.SelectionLength = 0;
