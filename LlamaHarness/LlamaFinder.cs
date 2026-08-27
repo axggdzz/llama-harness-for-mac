@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace LlamaLauncher;
+namespace LlamaHarness;
 
 /// <summary>
 /// llama-server.exe 定位（优先级：手动指定 → PATH → 常见安装位置）

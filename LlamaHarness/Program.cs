@@ -1,4 +1,4 @@
-namespace LlamaLauncher;
+namespace LlamaHarness;
 
 /// <summary>程序入口：单实例守卫 + 全局异常兜底 + 启动主窗口</summary>
 internal static class Program
@@ -10,10 +10,10 @@ internal static class Program
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
 
         // 单实例：防止两个实例同时唤醒 llama-server（显存双倍占用）
-        using var singleton = new Mutex(true, @"Local\LlamaLauncher", out bool createdNew);
+        using var singleton = new Mutex(true, @"Local\LlamaHarness", out bool createdNew);
         if (!createdNew)
         {
-            MessageBox.Show("LlamaLauncher 已在运行。", "提示",
+            MessageBox.Show("LlamaHarness 已在运行。", "提示",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }

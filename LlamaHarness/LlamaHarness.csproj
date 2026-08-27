@@ -6,8 +6,8 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <RootNamespace>LlamaLauncher</RootNamespace>
-    <AssemblyName>LlamaLauncher</AssemblyName>
+    <RootNamespace>LlamaHarness</RootNamespace>
+    <AssemblyName>Llama-harness</AssemblyName>
   </PropertyGroup>
 
 </Project>

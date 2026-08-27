@@ -2,7 +2,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 
-namespace LlamaLauncher;
+namespace LlamaHarness;
 
 /// <summary>
 /// 智能按需调度器（监听优先、按需启动、闲置释放）：

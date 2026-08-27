@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 
-namespace LlamaLauncher;
+namespace LlamaHarness;
 
 /// <summary>
 /// llama-server P 核亲和性绑定（Intel 混合架构 CPU，如 13900F）。

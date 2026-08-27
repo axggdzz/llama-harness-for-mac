@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
 
-namespace LlamaLauncher;
+namespace LlamaHarness;
 
 /// <summary>
 /// llama-server print_timing 日志行实时解析器（纯逻辑，无 UI/进程依赖）。

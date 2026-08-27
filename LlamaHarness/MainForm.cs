@@ -1,4 +1,4 @@
-namespace LlamaLauncher;
+namespace LlamaHarness;
 
 /// <summary>
 /// 主窗口：参数区（黄金底参默认值）+ 操作区 + 日志区（自动滚动）。
@@ -52,13 +52,13 @@ public class MainForm : Form
     private readonly System.Windows.Forms.Timer _metricsTimer = new() { Interval = 2000 };
     private int _metricsBusy; // 0=空闲 1=采样中（防重叠：nvidia-smi 可能耗时数秒）
 
-    // —— 日志区 ——
-    private readonly TextBox _txtLog = new()
+    // —— 日志区（RichTextBox：支持按行独立着色，历史行颜色不随新行改变）——
+    private readonly RichTextBox _txtLog = new()
     {
         Dock = DockStyle.Fill,
         Multiline = true,
         ReadOnly = true,
-        ScrollBars = ScrollBars.Vertical,
+        ScrollBars = RichTextBoxScrollBars.Vertical,
         WordWrap = false,
         BackColor = Color.FromArgb(30, 30, 30),
         ForeColor = Color.Gainsboro,
@@ -437,7 +437,7 @@ public class MainForm : Form
         {
             Title = "保存配置到…",
             Filter = "JSON 配置文件 (*.json)|*.json",
-            FileName = "llama-launcher-config.json",
+            FileName = "llama-harness-config.json",
         };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         try
@@ -671,18 +671,23 @@ public class MainForm : Form
         {
             _txtLog.AppendText(entry);
             if (_txtLog.TextLength > MaxLogChars)
-                _txtLog.Text = _txtLog.Text.Substring(_txtLog.TextLength / 2); // 仅保留最近一半
-            // 选中刚追加的行（截断后按长度回推起点）并着色
+            {
+                // 选区删除前半段（整体替换 Text 会丢失所有行颜色）
+                _txtLog.SelectionStart = 0;
+                _txtLog.SelectionLength = _txtLog.TextLength / 2;
+                _txtLog.SelectedText = "";
+            }
+            // 只给刚追加的这一行着色（SelectionColor 作用于选区），历史行颜色不受影响
             int start = Math.Max(0, _txtLog.TextLength - entry.Length);
             _txtLog.SelectionStart = start;
             _txtLog.SelectionLength = entry.Length;
-            _txtLog.ForeColor = LogFile.Classify(line) switch
+            _txtLog.SelectionColor = LogFile.Classify(line) switch
             {
                 LogFile.Level.Warn => Color.Gold,
                 LogFile.Level.Error => Color.Red,
                 _ => Color.LightGreen,
             };
-            // TextBox 无 ScrollToEnd，用选中位置滚动到末尾
+            // 无 ScrollToEnd，用选中位置滚动到末尾；随后取消选区避免高亮残留
             _txtLog.SelectionStart = _txtLog.TextLength;
             _txtLog.SelectionLength = 0;
         });

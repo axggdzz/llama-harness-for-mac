@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-namespace LlamaLauncher;
+namespace LlamaHarness;
 
 /// <summary>
 /// llama-server 进程封装：后台静默运行（无黑框），逐行输出事件，退出码事件。

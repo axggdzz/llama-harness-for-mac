@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace LlamaLauncher;
+namespace LlamaHarness;
 
 /// <summary>
 /// 应用配置模型。默认值为实测黄金底参：

@@ -1,4 +1,4 @@
-# llama.cpp 启动器（LlamaLauncher）设计规格
+﻿# llama.cpp 启动器（LlamaHarness）设计规格
 
 日期：2026-08-25
 状态：已评审通过（含用户三项优化）
@@ -35,7 +35,7 @@
 
 ## 4. 项目结构
 
-单一项目 `LlamaLauncher`，5 个核心文件：
+单一项目 `LlamaHarness`，5 个核心文件：
 
 | 文件 | 职责 |
 |---|---|

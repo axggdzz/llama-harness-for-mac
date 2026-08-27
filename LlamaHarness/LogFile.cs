@@ -1,8 +1,8 @@
-namespace LlamaLauncher;
+namespace LlamaHarness;
 
 /// <summary>
 /// UI 日志文件持久化 + 自动轮切 + 警告/错误独立输出：
-/// - launcher.log：全部日志，超 2MB 自动轮切为 launcher.log.1（保留一代备份）
+/// - harness.log：全部日志，超 2MB 自动轮切为 harness.log.1（保留一代备份）
 /// - warn_error.log：警告/错误每条独立成块，附带该条之前 10 条日志作上下文，便于排查
 /// 线程安全、尽力而为（永不抛出）。
 /// </summary>
@@ -26,12 +26,23 @@ public static class LogFile
     private static readonly System.Text.RegularExpressions.Regex SeverityRe =
         new(@"^\d[\d.]*\s+([IWE])\b", System.Text.RegularExpressions.RegexOptions.Compiled);
 
+    /// <summary>英文错误关键字（不带 I/W/E 前缀的输出兜底，词边界 + 不区分大小写）。</summary>
+    private static readonly System.Text.RegularExpressions.Regex ErrorKeywordRe =
+        new(@"\b(error|fatal|critical|exception|failed|failure)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>英文警告关键字。</summary>
+    private static readonly System.Text.RegularExpressions.Regex WarnKeywordRe =
+        new(@"\b(warning|warn)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
     public enum Level { Info, Warn, Error }
 
-    /// <summary>日志级别分类：中文关键字优先，其次识别 llama-server 输出的 I/W/E 严重度标记。</summary>
+    /// <summary>日志级别分类（中英双语）：
+    /// 1. 中文关键字（错误/失败/异常 → Error，警告 → Warn）；
+    /// 2. llama-server I/W/E 严重度标记；
+    /// 3. 英文关键字兜底（error/fatal/critical/exception/failed → Error，warning/warn → Warn）。</summary>
     public static Level Classify(string line)
     {
-        if (line.Contains("错误") || line.Contains("失败")) return Level.Error;
+        if (line.Contains("错误") || line.Contains("失败") || line.Contains("异常")) return Level.Error;
         if (line.Contains("警告")) return Level.Warn;
         var m = SeverityRe.Match(line);
         if (m.Success)
@@ -41,6 +52,8 @@ public static class LogFile
                 "W" => Level.Warn,
                 _ => Level.Info,
             };
+        if (ErrorKeywordRe.IsMatch(line)) return Level.Error;
+        if (WarnKeywordRe.IsMatch(line)) return Level.Warn;
         return Level.Info;
     }
 
@@ -67,10 +80,10 @@ public static class LogFile
         }
     }
 
-    /// <summary>写主日志 launcher.log，超限时轮切为 launcher.log.1。</summary>
+    /// <summary>写主日志 harness.log，超限时轮切为 harness.log.1。</summary>
     private static void AppendMain(string stampedLine)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "launcher.log");
+        var path = Path.Combine(AppContext.BaseDirectory, "harness.log");
         Rotate(path, MaxLogBytes);
         File.AppendAllText(path, stampedLine + Environment.NewLine);
     }

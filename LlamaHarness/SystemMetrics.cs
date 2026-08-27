@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
-namespace LlamaLauncher;
+namespace LlamaHarness;
 
 /// <summary>
 /// 系统资源采样（只读，无副作用）：
