@@ -687,9 +687,10 @@ public class MainForm : Form
                 LogFile.Level.Error => Color.Red,
                 _ => Color.LightGreen,
             };
-            // 无 ScrollToEnd，用选中位置滚动到末尾；随后取消选区避免高亮残留
+            // RichTextBox 追加后不会自动滚动到底部：把光标移到末尾并显式滚动（.NET Core 3+ API）
             _txtLog.SelectionStart = _txtLog.TextLength;
             _txtLog.SelectionLength = 0;
+            _txtLog.ScrollToCaret();
         });
     }
 }
