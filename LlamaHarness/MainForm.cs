@@ -131,8 +131,9 @@ public class MainForm : Form
         // 思考模式状态变更 → UI 标签
         _scheduler.ThinkingModeChanged += OnThinkingModeChanged;
 
-        // 启动时从附加参数判定初始思考模式：含 enable_thinking:false → 极速；否则默认开启
-        InitializeThinkingModeFromArgs();
+        // 启动时按当前附加参数显示初始思考模式（唤醒时会按实际启动参数权威重置）
+        RefreshThinkingLabel();
+        AppendLog($"思考模式初始状态：「{SmartScheduler.LabelOf(SmartScheduler.DetermineInitialThinkingMode(_config.ExtraArgs))}」");
 
         // 统计：日志行喂给解析器；解析结果/会话重置回 UI
         _scheduler.Log += line => _statsParser.Feed(line);
@@ -158,8 +159,10 @@ public class MainForm : Form
         _metricsTimer.Tick += OnMetricsTick;
         _metricsTimer.Start();
 
-        // 日志防抖定时器：批量消费队列，减少 RichTextBox 重绘闪烁
+        // 日志防抖定时器：批量消费队列，减少 RichTextBox 重绘闪烁。
+        // 常驻运行（不 Stop/Start）：跨线程操作 WinForms Timer 会导致 SetTimer 绑定错误消息循环而永久停摆
         _logFlushTimer.Tick += OnLogFlush;
+        _logFlushTimer.Start();
     }
 
     /// <summary>每 2 秒刷新资源标签。nvidia-smi 查询可能阻塞数百毫秒，放后台线程执行；同一时刻仅一个未完成采样，防线程堆积。</summary>
@@ -504,6 +507,7 @@ public class MainForm : Form
 
             WriteConfigToUi(cfg);   // 写入全部 UI 控件
             SyncUiToConfig();       // UI → 共享配置对象（下次唤醒即生效）
+            RefreshThinkingLabel(); // 附加参数可能变化，同步刷新思考模式标签
             AppendLog($"配置已载入：{dlg.FileName}");
         }
         catch (Exception ex)
@@ -521,27 +525,30 @@ public class MainForm : Form
     }
 
     /// <summary>思考模式状态变更（非 UI 线程）→ 标签更新。</summary>
-    private void OnThinkingModeChanged(bool enabled)
+    private void OnThinkingModeChanged(SmartScheduler.ThinkingLevel level)
     {
         if (!IsHandleCreated) return;
-        BeginInvoke(() => UpdateThinkingLabel(enabled));
+        BeginInvoke(() => UpdateThinkingLabel(level));
     }
 
-    /// <summary>更新思考模式标签文本和颜色。</summary>
-    private void UpdateThinkingLabel(bool enabled)
+    /// <summary>更新思考模式标签文本和颜色（四档：极速/轻度/中度/深度）。</summary>
+    private void UpdateThinkingLabel(SmartScheduler.ThinkingLevel level)
     {
-        _lblThinking.Text = enabled ? "思考: 已开启" : "思考: 极速";
-        _lblThinking.ForeColor = enabled ? Color.LightBlue : Color.Silver;
+        _lblThinking.Text = $"思考: {SmartScheduler.LabelOf(level)}";
+        _lblThinking.ForeColor = level switch
+        {
+            SmartScheduler.ThinkingLevel.Off => Color.Silver,
+            SmartScheduler.ThinkingLevel.Low => Color.LightGreen,
+            SmartScheduler.ThinkingLevel.Medium => Color.DodgerBlue,
+            _ => Color.LightBlue, // XHigh
+        };
     }
 
-    /// <summary>启动时从附加参数判定初始思考模式：含 enable_thinking:false → 极速；否则默认开启（思考）。</summary>
-    private void InitializeThinkingModeFromArgs()
+    /// <summary>按当前启动附加参数刷新思考模式标签（仅显示；权威重置在 SmartScheduler 唤醒时执行）。
+    /// enable_thinking:true → XHigh；false → Off；无该参数 → 默认开启（XHigh）。</summary>
+    private void RefreshThinkingLabel()
     {
-        bool hasDisableArg = _config.ExtraArgs.Contains("enable_thinking", StringComparison.OrdinalIgnoreCase)
-                              && System.Text.RegularExpressions.Regex.IsMatch(_config.ExtraArgs, @"enable_thinking""?\s*:\s*false");
-        bool initialThinking = !hasDisableArg; // 无 disable 参数 → 默认开启思考
-        UpdateThinkingLabel(initialThinking);
-        AppendLog($"思考模式初始状态：{(initialThinking ? "已开启" : "极速（enable_thinking=false）")}");
+        UpdateThinkingLabel(SmartScheduler.DetermineInitialThinkingMode(_config.ExtraArgs));
     }
 
     /// <summary>阶段切换（非 UI 线程）→ 控件启停 + 状态颜色；唤醒 = 新会话，清空统计。</summary>
@@ -684,7 +691,9 @@ public class MainForm : Form
         _metricsTimer.Stop();
         _logFlushTimer.Stop();
         // 刷出队列中剩余日志（避免最后几条丢失）
-        if (_logQueue.Count > 0) OnLogFlush(null!, EventArgs.Empty);
+        bool hasPending;
+        lock (_logQueue) hasPending = _logQueue.Count > 0;
+        if (hasPending) OnLogFlush(null!, EventArgs.Empty);
         if (_scheduler.CurrentPhase is SmartScheduler.Phase.Running
             or SmartScheduler.Phase.Waking
             or SmartScheduler.Phase.Sleeping)
@@ -717,59 +726,60 @@ public class MainForm : Form
         LogFile.Append(line); // 文件持久化 + 轮切 + 警告/错误独立输出
         var entry = $"[{DateTime.Now:HH:mm:ss}] {line}{Environment.NewLine}";
         lock (_logQueue) _logQueue.Enqueue((line, entry));
-        if (!_logFlushTimer.Enabled) _logFlushTimer.Start();
+        // 注意：禁止在此（后台线程）Start/Stop 定时器——Win32 SetTimer 绑定调用线程的消息循环，
+        // 跨线程 Start 会静默失败导致 UI 显示永久停摆。定时器常驻运行，OnLogFlush 空队列时直接返回。
     }
 
-    /// <summary>批量消费日志队列：一次 AppendText + 逐行着色，大幅减少 RichTextBox 重绘次数。</summary>
+    /// <summary>批量消费日志队列：一次 AppendText + 逐行着色，大幅减少 RichTextBox 重绘次数。（UI 线程）</summary>
     private void OnLogFlush(object? sender, EventArgs e)
     {
-        if (_logQueue.Count == 0)
-        {
-            _logFlushTimer.Stop();
-            return;
-        }
-        _logFlushTimer.Stop(); // 先停，消费后若有新日志再启
-        var batch = new List<(string line, string entry)>(_logQueue.Count);
+        List<(string line, string entry)> batch;
         lock (_logQueue)
         {
+            if (_logQueue.Count == 0) return; // 无新日志，直接返回（定时器常驻）
+            batch = new List<(string line, string entry)>(_logQueue.Count);
             while (_logQueue.Count > 0) batch.Add(_logQueue.Dequeue());
         }
 
-        // 一次批量 AppendText（减少重绘）
-        foreach (var (_, entry) in batch)
-            _txtLog.AppendText(entry);
-
-        // 字符上限截断
-        if (_txtLog.TextLength > MaxLogChars)
+        try
         {
-            _txtLog.SelectionStart = 0;
-            _txtLog.SelectionLength = _txtLog.TextLength / 2;
-            _txtLog.SelectedText = "";
-        }
+            // 一次批量 AppendText（减少重绘）
+            foreach (var (_, entry) in batch)
+                _txtLog.AppendText(entry);
 
-        // 逐行着色：从末尾往前累加 entry.Length 定位每行起点
-        int pos = _txtLog.TextLength;
-        for (int i = batch.Count - 1; i >= 0; i--)
-        {
-            var (line, entry) = batch[i];
-            pos -= entry.Length;
-            int start = Math.Max(0, pos);
-            _txtLog.SelectionStart = start;
-            _txtLog.SelectionLength = entry.Length;
-            _txtLog.SelectionColor = LogFile.Classify(line) switch
+            // 字符上限截断
+            if (_txtLog.TextLength > MaxLogChars)
             {
-                LogFile.Level.Warn => Color.Gold,
-                LogFile.Level.Error => Color.Red,
-                _ => Color.LightGreen,
-            };
+                _txtLog.SelectionStart = 0;
+                _txtLog.SelectionLength = _txtLog.TextLength / 2;
+                _txtLog.SelectedText = "";
+            }
+
+            // 逐行着色：从末尾往前累加 entry.Length 定位每行起点
+            int pos = _txtLog.TextLength;
+            for (int i = batch.Count - 1; i >= 0; i--)
+            {
+                var (line, entry) = batch[i];
+                pos -= entry.Length;
+                int start = Math.Max(0, pos);
+                _txtLog.SelectionStart = start;
+                _txtLog.SelectionLength = entry.Length;
+                _txtLog.SelectionColor = LogFile.Classify(line) switch
+                {
+                    LogFile.Level.Warn => Color.Gold,
+                    LogFile.Level.Error => Color.Red,
+                    _ => Color.LightGreen,
+                };
+            }
+
+            // 滚动到底部
+            _txtLog.SelectionStart = _txtLog.TextLength;
+            _txtLog.SelectionLength = 0;
+            _txtLog.ScrollToCaret();
         }
-
-        // 滚动到底部
-        _txtLog.SelectionStart = _txtLog.TextLength;
-        _txtLog.SelectionLength = 0;
-        _txtLog.ScrollToCaret();
-
-        // 若消费期间又有新日志入队，重新启定时器
-        if (_logQueue.Count > 0) _logFlushTimer.Start();
+        catch
+        {
+            // 显示层异常不得杀死日志管道（文件层已持久化），吞掉继续
+        }
     }
 }

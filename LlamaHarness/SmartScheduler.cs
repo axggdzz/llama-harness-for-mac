@@ -51,18 +51,54 @@ public sealed class SmartScheduler : IDisposable
     public event Action<Phase>? PhaseChanged;
     /// <summary>C-007：进入 Waking 阶段时触发，UI 据此重置统计解析器（职责下沉到调度器内部，不再依赖 UI 自行监听 PhaseChanged）。</summary>
     public event Action? StatsReset;
-    /// <summary>思考模式状态变更（可能来自任意线程），UI 侧负责 BeginInvoke。参数为当前模式（true=思考，false=极速）。</summary>
-    public event Action<bool>? ThinkingModeChanged;
+    /// <summary>思考模式状态变更（可能来自任意线程），UI 侧负责 BeginInvoke。参数为当前档位。</summary>
+    public event Action<ThinkingLevel>? ThinkingModeChanged;
 
     // C-102 运行统计埋点
     private int _wakeCount, _sleepCount, _inflightPeak;
 
-    /// <summary>全局思考模式状态位（lock 保护，多 agent 并发安全）。默认 false = 极速模式（65+ t/s）。</summary>
-    private bool _thinkingMode = false;
+    /// <summary>思考模式三档状态机（lock 保护，多 agent 并发安全）。默认 Off = 极速模式（65+ t/s）。</summary>
+    private ThinkingLevel _thinkingMode = ThinkingLevel.Off;
     private readonly object _thinkingGate = new();
 
-    /// <summary>当前思考模式状态（线程安全读取）。</summary>
-    public bool ThinkingMode { get { lock (_thinkingGate) return _thinkingMode; } }
+    /// <summary>当前思考模式档位（线程安全读取）。</summary>
+    public ThinkingLevel ThinkingMode { get { lock (_thinkingGate) return _thinkingMode; } }
+
+    /// <summary>从启动附加参数判定初始思考档位：
+    /// enable_thinking:true → XHigh；enable_thinking:false → Off；无该参数 → 默认开启（XHigh）。
+    /// 兼容转义引号写法：--chat-template-kwargs "{\"enable_thinking\":false}"。</summary>
+    public static ThinkingLevel DetermineInitialThinkingMode(string extraArgs)
+    {
+        if (string.IsNullOrWhiteSpace(extraArgs)) return ThinkingLevel.XHigh; // 无参数 = 默认开启
+        var m = System.Text.RegularExpressions.Regex.Match(
+            extraArgs,
+            @"enable_thinking\\?""?\s*:\s*(true|false)",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return (!m.Success || m.Groups[1].Value.Equals("true", StringComparison.OrdinalIgnoreCase))
+            ? ThinkingLevel.XHigh
+            : ThinkingLevel.Off;
+    }
+
+    /// <summary>思考模式档位：Off=极速（不注入）/ Low / Medium / XHigh。Low~XHigh 均携带 enable_thinking=true。</summary>
+    public enum ThinkingLevel { Off, Low, Medium, XHigh }
+
+    /// <summary>档位 → reasoning_effort 值；Off 返回 null（不注入）。</summary>
+    public static string? EffortOf(ThinkingLevel lvl) => lvl switch
+    {
+        ThinkingLevel.Low => "low",
+        ThinkingLevel.Medium => "medium",
+        ThinkingLevel.XHigh => "xhigh",
+        _ => null,
+    };
+
+    /// <summary>档位显示名。</summary>
+    public static string LabelOf(ThinkingLevel lvl) => lvl switch
+    {
+        ThinkingLevel.Off => "极速",
+        ThinkingLevel.Low => "轻度推理",
+        ThinkingLevel.Medium => "中度推理",
+        _ => "深度推理",
+    };
 
     public bool AutoMode { get; set; } = true;
     public int IdleMinutes { get; set; } = 15;
@@ -330,6 +366,12 @@ public sealed class SmartScheduler : IDisposable
             string? affinityDesc = CpuAffinity.Apply(_server.Current, _cfg.PCoreMask);
             Log?.Invoke(affinityDesc != null ? $"P核绑定生效：{affinityDesc}" : "P核绑定已禁用（掩码为空或无效）。");
 
+            // 思考模式基线：新服务进程按本次启动参数重置（运行态指令切换不跨会话携带）
+            var baseLevel = DetermineInitialThinkingMode(_cfg.ExtraArgs);
+            lock (_thinkingGate) { _thinkingMode = baseLevel; }
+            ThinkingModeChanged?.Invoke(baseLevel);
+            Log?.Invoke($"思考模式基线：「{LabelOf(baseLevel)}」（{(EffortOf(baseLevel) is var be && be != null ? $"reasoning_effort={be}, " : "")}enable_thinking={(baseLevel == ThinkingLevel.Off ? "false" : "true")}）。");
+
             await WaitReadyAsync(srvPort);
 
             Touch();
@@ -357,11 +399,14 @@ public sealed class SmartScheduler : IDisposable
 
     /// <summary>轮询后端 /v1/models 直至就绪（最长 5 分钟），期间进程退出立即报错。
     /// C-003：不仅校验 HTTP 200，还校验响应内容含 "object":"list" 模型列表特征——
-    /// 防 TOCTOU 窗口内其他程序抢占后端端口时被误判为 llama-server 就绪。</summary>
+    /// 防 TOCTOU 窗口内其他程序抢占后端端口时被误判为 llama-server 就绪。
+    /// 每 15 秒输出一次进度（大模型加载可达数分钟），避免界面无反馈看似卡死。</summary>
     private async Task WaitReadyAsync(int srvPort)
     {
         var url = $"http://localhost:{srvPort}/v1/models";
         var deadline = DateTime.Now + TimeSpan.FromMinutes(5);
+        var start = DateTime.Now;
+        int nextProgressAtSec = 10; // 下次进度日志的累计秒数阈值
         while (DateTime.Now < deadline)
         {
             try
@@ -382,6 +427,15 @@ public sealed class SmartScheduler : IDisposable
             if (!_server.IsRunning)
                 throw new InvalidOperationException(
                     "llama-server 进程已退出，唤醒失败。\n最近输出：\n" + RecentOutput());
+
+            // 进度反馈：大模型（数十 GB）加载耗时可达数分钟，期间静默等待易被误判为卡死
+            int elapsedSec = (int)(DateTime.Now - start).TotalSeconds;
+            if (elapsedSec >= nextProgressAtSec)
+            {
+                nextProgressAtSec = elapsedSec + 15;
+                var lastLine = RecentOutput().Split('\n').LastOrDefault()?.Trim();
+                Log?.Invoke($"等待 llama-server 就绪… {elapsedSec}s（正在加载模型/显存分配。最新输出：{(string.IsNullOrEmpty(lastLine) ? "无" : lastLine)}）");
+            }
             await Task.Delay(2000);
         }
         throw new TimeoutException("等待 llama-server 就绪超时（5 分钟）。");
@@ -414,19 +468,21 @@ public sealed class SmartScheduler : IDisposable
             {
                 var body = System.Text.Encoding.UTF8.GetString(bodyBytes);
 
-                // 思考模式拦截（仅 chat/completions）：识别指令 / 注入 enable_thinking
+                // 思考模式拦截（仅 chat/completions）：识别指令 / 注入 reasoning_effort + enable_thinking
                 if (IsChatCompletions(p))
                 {
-                    bool tm, changed;
+                    ThinkingLevel lvl, prev;
+                    bool changed;
                     lock (_thinkingGate)
                     {
-                        tm = _thinkingMode;
-                        var injected = InjectThinkingMode(body, ref tm);
+                        prev = _thinkingMode;
+                        lvl = _thinkingMode;
+                        var injected = InjectThinkingMode(body, ref lvl);
                         if (injected != null)
                         {
-                            changed = tm != _thinkingMode;
-                            _thinkingMode = tm;
                             body = injected;
+                            changed = lvl != prev;
+                            _thinkingMode = lvl;
                         }
                         else
                         {
@@ -436,10 +492,8 @@ public sealed class SmartScheduler : IDisposable
                     bodyBytes = System.Text.Encoding.UTF8.GetBytes(body);
                     if (changed)
                     {
-                        Log?.Invoke(tm
-                            ? "思考模式已开启，后续流式请求将携带 enable_thinking=true。"
-                            : "思考模式已关闭（极速模式），后续流式请求将携带 enable_thinking=false。");
-                        ThinkingModeChanged?.Invoke(tm);
+                        Log?.Invoke($"思考模式已切换为「{LabelOf(lvl)}」（{(EffortOf(lvl) is var e && e != null ? $"reasoning_effort={e}, " : "")}enable_thinking={(lvl == ThinkingLevel.Off ? "false" : "true")}）。");
+                        ThinkingModeChanged?.Invoke(lvl);
                     }
                 }
 
@@ -586,22 +640,29 @@ public sealed class SmartScheduler : IDisposable
 
     /// <summary>
     /// 思考模式拦截与注入（仅 chat/completions POST 请求体）：
-    /// 1. 检测 messages 数组最后一条 user 消息是否含「开启思考模式」/「关闭思考模式」指令；
-    ///    命中 → 翻转全局状态位，剥离指令文本（避免模型把指令当问题回答），该请求本身即携带新值。
-    /// 2. 普通请求 → 按当前状态位注入 chat_template_kwargs.enable_thinking: true/false。
+    /// 1. 检测 messages 数组最后一条 user 消息是否含思考/推理指令：
+    ///    - 「开启思考模式」→ XHigh（未指定深度时默认深度档）；
+    ///    - 「关闭思考模式」→ Off；
+    ///    - 「开启轻度推理模式」→ Low；「开启中度推理模式」→ Medium；「开启深度推理模式」→ XHigh。
+    ///    命中 → 设置全局档位，剥离指令文本（避免模型把指令当问题回答）。
+    /// 2. 普通请求：Off → 不注入（沿用服务端启动参数）；Low/Medium/XHigh → 注入对应 reasoning_effort + enable_thinking=true。
     /// DOM 解析失败时透传原始请求（返回 null）。
     /// </summary>
     /// <param name="json">请求体 JSON</param>
-    /// <param name="thinkingMode">当前全局思考模式状态位（ref：指令命中时翻转）</param>
+    /// <param name="level">当前全局思考档位（ref：指令命中时更新）</param>
     /// <returns>改写后的 JSON；null = 无需改写或解析失败，调用方透传。</returns>
-    public static string? InjectThinkingMode(string json, ref bool thinkingMode)
+    public static string? InjectThinkingMode(string json, ref ThinkingLevel level)
     {
+        // 快速路径：Off 态且无指令文本 → 不注入也不识别，无需解析
+        if (level == ThinkingLevel.Off && !ContainsAnyInstruction(json))
+            return null;
         try
         {
             var node = System.Text.Json.Nodes.JsonNode.Parse(json);
             if (node is not System.Text.Json.Nodes.JsonObject obj) return null;
 
-            // 1. 检测末条 user 消息中的思考模式指令
+            // 1. 检测末条 user 消息中的思考/推理指令
+            bool hit = false;
             if (obj["messages"] is System.Text.Json.Nodes.JsonArray msgs && msgs.Count > 0)
             {
                 for (int i = msgs.Count - 1; i >= 0; i--)
@@ -622,37 +683,45 @@ public sealed class SmartScheduler : IDisposable
 
                     bool hitOn = contentStr.Contains("开启思考模式");
                     bool hitOff = contentStr.Contains("关闭思考模式");
-                    if (hitOn || hitOff)
-                    {
-                        bool newMode = hitOn;
-                        if (newMode != thinkingMode)
-                        {
-                            thinkingMode = newMode;
-                        }
-                        // 剥离指令文本，保留其余内容
-                        var stripped = hitOn
-                            ? contentStr.Replace("开启思考模式", "")
-                            : contentStr.Replace("关闭思考模式", "");
-                        msgObj["content"] = stripped.Trim();
-                        break;
-                    }
+                    bool hitLow = contentStr.Contains("开启轻度推理模式");
+                    bool hitMid = contentStr.Contains("开启中度推理模式");
+                    bool hitDeep = contentStr.Contains("开启深度推理模式");
+                    if (!hitOn && !hitOff && !hitLow && !hitMid && !hitDeep) continue;
+
+                    // 剥离全部命中指令，保留其余内容；若消息只剩指令本身，填确认提示避免空消息让模型困惑
+                    string stripped = contentStr;
+                    if (hitOn) { level = ThinkingLevel.XHigh; stripped = stripped.Replace("开启思考模式", ""); }
+                    if (hitOff) { level = ThinkingLevel.Off; stripped = stripped.Replace("关闭思考模式", ""); }
+                    if (hitLow) { level = ThinkingLevel.Low; stripped = stripped.Replace("开启轻度推理模式", ""); }
+                    if (hitMid) { level = ThinkingLevel.Medium; stripped = stripped.Replace("开启中度推理模式", ""); }
+                    if (hitDeep) { level = ThinkingLevel.XHigh; stripped = stripped.Replace("开启深度推理模式", ""); }
+                    msgObj["content"] = string.IsNullOrWhiteSpace(stripped.Trim())
+                        ? "（思考/推理模式已切换，请简短确认）"
+                        : stripped.Trim();
+                    hit = true;
+                    break;
                 }
             }
 
-            // 2. 注入 chat_template_kwargs.enable_thinking（始终注入，确保后端行为确定）
-            System.Text.Json.Nodes.JsonObject ctk;
-            if (obj["chat_template_kwargs"] is System.Text.Json.Nodes.JsonObject existing)
+            // 2. 注入：Off → 不注入；Low/Medium/XHigh → 注入对应 reasoning_effort + enable_thinking=true
+            var effort = EffortOf(level);
+            if (effort != null)
             {
-                ctk = existing;
+                System.Text.Json.Nodes.JsonObject ctk;
+                if (obj["chat_template_kwargs"] is System.Text.Json.Nodes.JsonObject existing)
+                {
+                    ctk = existing;
+                }
+                else
+                {
+                    ctk = new System.Text.Json.Nodes.JsonObject();
+                    obj["chat_template_kwargs"] = ctk;
+                }
+                ctk["reasoning_effort"] = effort;
+                ctk["enable_thinking"] = true;
             }
-            else
-            {
-                ctk = new System.Text.Json.Nodes.JsonObject();
-                obj["chat_template_kwargs"] = ctk;
-            }
-            ctk["enable_thinking"] = thinkingMode;
 
-            return obj.ToJsonString();
+            return hit || level != ThinkingLevel.Off ? obj.ToJsonString() : null;
         }
         catch
         {
@@ -660,6 +729,12 @@ public sealed class SmartScheduler : IDisposable
             return null;
         }
     }
+
+    /// <summary>是否含任一思考/推理指令文本（快速路径判断用）。</summary>
+    private static bool ContainsAnyInstruction(string json) =>
+        json.Contains("开启思考模式") || json.Contains("关闭思考模式")
+        || json.Contains("开启轻度推理模式") || json.Contains("开启中度推理模式")
+        || json.Contains("开启深度推理模式");
 
     // ==================== 闲置休眠（15 分钟无请求自动释放） ====================
 
