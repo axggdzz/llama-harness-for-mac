@@ -51,9 +51,18 @@ public sealed class SmartScheduler : IDisposable
     public event Action<Phase>? PhaseChanged;
     /// <summary>C-007：进入 Waking 阶段时触发，UI 据此重置统计解析器（职责下沉到调度器内部，不再依赖 UI 自行监听 PhaseChanged）。</summary>
     public event Action? StatsReset;
+    /// <summary>思考模式状态变更（可能来自任意线程），UI 侧负责 BeginInvoke。参数为当前模式（true=思考，false=极速）。</summary>
+    public event Action<bool>? ThinkingModeChanged;
 
     // C-102 运行统计埋点
     private int _wakeCount, _sleepCount, _inflightPeak;
+
+    /// <summary>全局思考模式状态位（lock 保护，多 agent 并发安全）。默认 false = 极速模式（65+ t/s）。</summary>
+    private bool _thinkingMode = false;
+    private readonly object _thinkingGate = new();
+
+    /// <summary>当前思考模式状态（线程安全读取）。</summary>
+    public bool ThinkingMode { get { lock (_thinkingGate) return _thinkingMode; } }
 
     public bool AutoMode { get; set; } = true;
     public int IdleMinutes { get; set; } = 15;
@@ -404,6 +413,36 @@ public sealed class SmartScheduler : IDisposable
             if (isCompletions)
             {
                 var body = System.Text.Encoding.UTF8.GetString(bodyBytes);
+
+                // 思考模式拦截（仅 chat/completions）：识别指令 / 注入 enable_thinking
+                if (IsChatCompletions(p))
+                {
+                    bool tm, changed;
+                    lock (_thinkingGate)
+                    {
+                        tm = _thinkingMode;
+                        var injected = InjectThinkingMode(body, ref tm);
+                        if (injected != null)
+                        {
+                            changed = tm != _thinkingMode;
+                            _thinkingMode = tm;
+                            body = injected;
+                        }
+                        else
+                        {
+                            changed = false;
+                        }
+                    }
+                    bodyBytes = System.Text.Encoding.UTF8.GetBytes(body);
+                    if (changed)
+                    {
+                        Log?.Invoke(tm
+                            ? "思考模式已开启，后续流式请求将携带 enable_thinking=true。"
+                            : "思考模式已关闭（极速模式），后续流式请求将携带 enable_thinking=false。");
+                        ThinkingModeChanged?.Invoke(tm);
+                    }
+                }
+
                 bool streaming = System.Text.RegularExpressions.Regex.IsMatch(body, @"""stream""\s*:\s*true");
                 if (!streaming)
                 {
@@ -497,7 +536,13 @@ public sealed class SmartScheduler : IDisposable
         if (!string.Equals(req.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase)) return false;
         var p = req.Url?.AbsolutePath ?? "";
         return p.Contains("completion", StringComparison.OrdinalIgnoreCase)
-            || p.Contains("embedding", StringComparison.OrdinalIgnoreCase);
+               || p.Contains("embedding", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>判断是否为 chat/completions 推理请求（思考模式注入仅对此类请求生效）。</summary>
+    private static bool IsChatCompletions(string path)
+    {
+        return path.Contains("/chat/completions", StringComparison.OrdinalIgnoreCase);
     }
 
     private int _nonStreamWarned; // 每会话只告警一次，唤醒时重置
@@ -537,6 +582,83 @@ public sealed class SmartScheduler : IDisposable
         bool hasComma = prefix.EndsWith(',');
         string field = "\"stream\":true";
         return $"{json.Substring(0, idx)}{(hasComma ? "" : ",")}{field}{json.Substring(idx)}";
+    }
+
+    /// <summary>
+    /// 思考模式拦截与注入（仅 chat/completions POST 请求体）：
+    /// 1. 检测 messages 数组最后一条 user 消息是否含「开启思考模式」/「关闭思考模式」指令；
+    ///    命中 → 翻转全局状态位，剥离指令文本（避免模型把指令当问题回答），该请求本身即携带新值。
+    /// 2. 普通请求 → 按当前状态位注入 chat_template_kwargs.enable_thinking: true/false。
+    /// DOM 解析失败时透传原始请求（返回 null）。
+    /// </summary>
+    /// <param name="json">请求体 JSON</param>
+    /// <param name="thinkingMode">当前全局思考模式状态位（ref：指令命中时翻转）</param>
+    /// <returns>改写后的 JSON；null = 无需改写或解析失败，调用方透传。</returns>
+    public static string? InjectThinkingMode(string json, ref bool thinkingMode)
+    {
+        try
+        {
+            var node = System.Text.Json.Nodes.JsonNode.Parse(json);
+            if (node is not System.Text.Json.Nodes.JsonObject obj) return null;
+
+            // 1. 检测末条 user 消息中的思考模式指令
+            if (obj["messages"] is System.Text.Json.Nodes.JsonArray msgs && msgs.Count > 0)
+            {
+                for (int i = msgs.Count - 1; i >= 0; i--)
+                {
+                    if (msgs[i] is not System.Text.Json.Nodes.JsonObject msgObj) continue;
+                    // role 提取：JsonNode.ToString() 对字符串节点返回不带引号的原始值
+                    string? roleStr = msgObj["role"]?.ToString();
+                    if (!string.Equals(roleStr, "user", StringComparison.OrdinalIgnoreCase)) break;
+
+                    // content 提取：仅处理字符串类型（数组/对象跳过）
+                    var contentNode = msgObj["content"];
+                    if (contentNode == null) continue;
+                    // AsObject() 对非对象节点抛异常，用 try-catch 安全判断
+                    bool isContainer = false;
+                    try { isContainer = contentNode.AsObject() != null || contentNode.AsArray() != null; } catch { }
+                    if (isContainer) continue;
+                    string contentStr = contentNode.ToString();
+
+                    bool hitOn = contentStr.Contains("开启思考模式");
+                    bool hitOff = contentStr.Contains("关闭思考模式");
+                    if (hitOn || hitOff)
+                    {
+                        bool newMode = hitOn;
+                        if (newMode != thinkingMode)
+                        {
+                            thinkingMode = newMode;
+                        }
+                        // 剥离指令文本，保留其余内容
+                        var stripped = hitOn
+                            ? contentStr.Replace("开启思考模式", "")
+                            : contentStr.Replace("关闭思考模式", "");
+                        msgObj["content"] = stripped.Trim();
+                        break;
+                    }
+                }
+            }
+
+            // 2. 注入 chat_template_kwargs.enable_thinking（始终注入，确保后端行为确定）
+            System.Text.Json.Nodes.JsonObject ctk;
+            if (obj["chat_template_kwargs"] is System.Text.Json.Nodes.JsonObject existing)
+            {
+                ctk = existing;
+            }
+            else
+            {
+                ctk = new System.Text.Json.Nodes.JsonObject();
+                obj["chat_template_kwargs"] = ctk;
+            }
+            ctk["enable_thinking"] = thinkingMode;
+
+            return obj.ToJsonString();
+        }
+        catch
+        {
+            // DOM 解析失败（非法 JSON），透传原始请求
+            return null;
+        }
     }
 
     // ==================== 闲置休眠（15 分钟无请求自动释放） ====================

@@ -36,6 +36,15 @@ public class MainForm : Form
     private readonly Button _btnExportCfg = new() { Text = "保存配置到…", Size = new Size(100, 32) };
     private readonly Button _btnImportCfg = new() { Text = "载入配置", Size = new Size(100, 32) };
     private readonly Label _lblStatus = new() { Text = "空闲", Dock = DockStyle.Fill, ForeColor = Color.Gray };
+    // 思考模式状态标签（操作行右侧）
+    private readonly Label _lblThinking = new()
+    {
+        Text = "思考: 极速",
+        Dock = DockStyle.Fill,
+        TextAlign = ContentAlignment.MiddleRight,
+        ForeColor = Color.Silver,
+        Margin = new Padding(8, 0, 4, 0),
+    };
 
     // —— 系统资源统计（操作行下方，2 秒轮询）——
     private readonly SystemMetrics _metrics = new();
@@ -64,6 +73,9 @@ public class MainForm : Form
         ForeColor = Color.Gainsboro,
         Font = new Font("Consolas", 9F),
     };
+    // 日志防抖：高频日志先入队列，UI 定时器批量消费（减少 RichTextBox 重绘次数，消除闪烁）
+    private readonly Queue<(string line, string entry)> _logQueue = new();
+    private readonly System.Windows.Forms.Timer _logFlushTimer = new() { Interval = 150 };
 
     // —— 统计区（实时解析 print_timing）——
     private readonly LlamaStatsParser _statsParser = new();
@@ -116,6 +128,11 @@ public class MainForm : Form
         _scheduler.PhaseChanged += OnPhaseChanged;
         // C-007：统计重置由调度器状态机驱动（Waking 时自动触发），不再依赖 UI 监听 PhaseChanged
         _scheduler.StatsReset += () => _statsParser.Reset();
+        // 思考模式状态变更 → UI 标签
+        _scheduler.ThinkingModeChanged += OnThinkingModeChanged;
+
+        // 启动时从附加参数判定初始思考模式：含 enable_thinking:false → 极速；否则默认开启
+        InitializeThinkingModeFromArgs();
 
         // 统计：日志行喂给解析器；解析结果/会话重置回 UI
         _scheduler.Log += line => _statsParser.Feed(line);
@@ -140,6 +157,9 @@ public class MainForm : Form
         // 资源轮询：CPU 需两次采样取差值，首次 tick 建立基准
         _metricsTimer.Tick += OnMetricsTick;
         _metricsTimer.Start();
+
+        // 日志防抖定时器：批量消费队列，减少 RichTextBox 重绘闪烁
+        _logFlushTimer.Tick += OnLogFlush;
     }
 
     /// <summary>每 2 秒刷新资源标签。nvidia-smi 查询可能阻塞数百毫秒，放后台线程执行；同一时刻仅一个未完成采样，防线程堆积。</summary>
@@ -207,13 +227,14 @@ public class MainForm : Form
         var opPanel = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
-            ColumnCount = 6,
+            ColumnCount = 7,
             Padding = new Padding(8, 6, 8, 6),
             AutoSize = true,
         };
         opPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         for (int i = 0; i < 5; i++)
             opPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        opPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); // 思考模式标签
         opPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         opPanel.Controls.Add(_lblStatus, 0, 0);
         opPanel.Controls.Add(_btnClearLog, 1, 0);
@@ -221,6 +242,7 @@ public class MainForm : Form
         opPanel.Controls.Add(_btnImportCfg, 3, 0);  // 载入配置
         opPanel.Controls.Add(_btnStop, 4, 0);
         opPanel.Controls.Add(_btnStart, 5, 0);
+        opPanel.Controls.Add(_lblThinking, 6, 0);   // 思考模式状态
 
         // —— 统计面板（汇总行 + 表格）——
         var statsPanel = new TableLayoutPanel
@@ -367,7 +389,11 @@ public class MainForm : Form
                 _txtModel.Text = dlg.FileName;
         };
 
-        _btnClearLog.Click += (_, _) => _txtLog.Clear();
+        _btnClearLog.Click += (_, _) =>
+        {
+            lock (_logQueue) _logQueue.Clear(); // 清空队列，防止残留旧日志追加
+            _txtLog.Clear();
+        };
         _btnClearStats.Click += (_, _) => _statsParser.Reset();
         _btnExportCfg.Click += OnExportConfigClick;
         _btnImportCfg.Click += OnImportConfigClick;
@@ -492,6 +518,30 @@ public class MainForm : Form
     {
         if (!IsHandleCreated) return;
         BeginInvoke(() => _lblStatus.Text = text);
+    }
+
+    /// <summary>思考模式状态变更（非 UI 线程）→ 标签更新。</summary>
+    private void OnThinkingModeChanged(bool enabled)
+    {
+        if (!IsHandleCreated) return;
+        BeginInvoke(() => UpdateThinkingLabel(enabled));
+    }
+
+    /// <summary>更新思考模式标签文本和颜色。</summary>
+    private void UpdateThinkingLabel(bool enabled)
+    {
+        _lblThinking.Text = enabled ? "思考: 已开启" : "思考: 极速";
+        _lblThinking.ForeColor = enabled ? Color.LightBlue : Color.Silver;
+    }
+
+    /// <summary>启动时从附加参数判定初始思考模式：含 enable_thinking:false → 极速；否则默认开启（思考）。</summary>
+    private void InitializeThinkingModeFromArgs()
+    {
+        bool hasDisableArg = _config.ExtraArgs.Contains("enable_thinking", StringComparison.OrdinalIgnoreCase)
+                              && System.Text.RegularExpressions.Regex.IsMatch(_config.ExtraArgs, @"enable_thinking""?\s*:\s*false");
+        bool initialThinking = !hasDisableArg; // 无 disable 参数 → 默认开启思考
+        UpdateThinkingLabel(initialThinking);
+        AppendLog($"思考模式初始状态：{(initialThinking ? "已开启" : "极速（enable_thinking=false）")}");
     }
 
     /// <summary>阶段切换（非 UI 线程）→ 控件启停 + 状态颜色；唤醒 = 新会话，清空统计。</summary>
@@ -632,6 +682,9 @@ public class MainForm : Form
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
         _metricsTimer.Stop();
+        _logFlushTimer.Stop();
+        // 刷出队列中剩余日志（避免最后几条丢失）
+        if (_logQueue.Count > 0) OnLogFlush(null!, EventArgs.Empty);
         if (_scheduler.CurrentPhase is SmartScheduler.Phase.Running
             or SmartScheduler.Phase.Waking
             or SmartScheduler.Phase.Sleeping)
@@ -657,28 +710,50 @@ public class MainForm : Form
     /// <summary>日志字符上限（约数万行）：防止长期运行无限增长拖慢 UI。</summary>
     private const int MaxLogChars = 400_000;
 
-    /// <summary>追加一行带时间戳的日志并按级别着色（正常绿/警告黄/错误红），自动滚到底部。可来自任意线程。</summary>
+    /// <summary>追加一行带时间戳的日志并按级别着色（正常绿/警告黄/错误红），自动滚到底部。可来自任意线程。
+    /// 防抖：日志先入队列，UI 定时器每 150ms 批量消费（一次 AppendText + 逐行着色），减少重绘闪烁。</summary>
     private void AppendLog(string line)
     {
         LogFile.Append(line); // 文件持久化 + 轮切 + 警告/错误独立输出
         var entry = $"[{DateTime.Now:HH:mm:ss}] {line}{Environment.NewLine}";
-        if (!IsHandleCreated)
+        lock (_logQueue) _logQueue.Enqueue((line, entry));
+        if (!_logFlushTimer.Enabled) _logFlushTimer.Start();
+    }
+
+    /// <summary>批量消费日志队列：一次 AppendText + 逐行着色，大幅减少 RichTextBox 重绘次数。</summary>
+    private void OnLogFlush(object? sender, EventArgs e)
+    {
+        if (_logQueue.Count == 0)
         {
-            _txtLog.AppendText(entry);
+            _logFlushTimer.Stop();
             return;
         }
-        BeginInvoke(() =>
+        _logFlushTimer.Stop(); // 先停，消费后若有新日志再启
+        var batch = new List<(string line, string entry)>(_logQueue.Count);
+        lock (_logQueue)
         {
+            while (_logQueue.Count > 0) batch.Add(_logQueue.Dequeue());
+        }
+
+        // 一次批量 AppendText（减少重绘）
+        foreach (var (_, entry) in batch)
             _txtLog.AppendText(entry);
-            if (_txtLog.TextLength > MaxLogChars)
-            {
-                // 选区删除前半段（整体替换 Text 会丢失所有行颜色）
-                _txtLog.SelectionStart = 0;
-                _txtLog.SelectionLength = _txtLog.TextLength / 2;
-                _txtLog.SelectedText = "";
-            }
-            // 只给刚追加的这一行着色（SelectionColor 作用于选区），历史行颜色不受影响
-            int start = Math.Max(0, _txtLog.TextLength - entry.Length);
+
+        // 字符上限截断
+        if (_txtLog.TextLength > MaxLogChars)
+        {
+            _txtLog.SelectionStart = 0;
+            _txtLog.SelectionLength = _txtLog.TextLength / 2;
+            _txtLog.SelectedText = "";
+        }
+
+        // 逐行着色：从末尾往前累加 entry.Length 定位每行起点
+        int pos = _txtLog.TextLength;
+        for (int i = batch.Count - 1; i >= 0; i--)
+        {
+            var (line, entry) = batch[i];
+            pos -= entry.Length;
+            int start = Math.Max(0, pos);
             _txtLog.SelectionStart = start;
             _txtLog.SelectionLength = entry.Length;
             _txtLog.SelectionColor = LogFile.Classify(line) switch
@@ -687,10 +762,14 @@ public class MainForm : Form
                 LogFile.Level.Error => Color.Red,
                 _ => Color.LightGreen,
             };
-            // RichTextBox 追加后不会自动滚动到底部：把光标移到末尾并显式滚动（.NET Core 3+ API）
-            _txtLog.SelectionStart = _txtLog.TextLength;
-            _txtLog.SelectionLength = 0;
-            _txtLog.ScrollToCaret();
-        });
+        }
+
+        // 滚动到底部
+        _txtLog.SelectionStart = _txtLog.TextLength;
+        _txtLog.SelectionLength = 0;
+        _txtLog.ScrollToCaret();
+
+        // 若消费期间又有新日志入队，重新启定时器
+        if (_logQueue.Count > 0) _logFlushTimer.Start();
     }
 }
