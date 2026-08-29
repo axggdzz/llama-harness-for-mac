@@ -342,7 +342,7 @@ public class MainForm : Form
             Dock = DockStyle.Left,
             Width = 240,
             BackColor = C_Card, // #2d2d2d
-            Padding = new Padding(16),
+            Padding = new Padding(0), // 边距由下方 Percent 列控制（等比缩放）
             AutoScroll = false, // 禁用滚动条（内容高度足够容纳全部按钮）
         };
 
@@ -355,7 +355,6 @@ public class MainForm : Form
             ImageAlign = ContentAlignment.MiddleLeft,
             TextAlign = ContentAlignment.MiddleCenter,
             Height = 44,
-            Dock = DockStyle.Top,
             ForeColor = Color.White,
             Font = new Font("Microsoft YaHei UI", 11F, FontStyle.Bold),
             BackColor = C_BtnHover, // #4a4a4a（默认色，原悬停色）
@@ -395,23 +394,47 @@ public class MainForm : Form
         btnFaq.Click += (_, _) => ShowDocForm("常见问题", "static/doc/FAQs.md");
         btnChangelog.Click += (_, _) => ShowDocForm("更新内容", "static/doc/update.md");
 
-        var leftFlow = new FlowLayoutPanel
+        // ── 布局网格：[12.5% | 75% | 12.5%] 三列——所有按键/容器放中列，
+        // 等宽（含应用名）+ 居中 + 左右间隔等宽；Percent 列保证侧边栏放大时边距等比缩放 ──
+        var grid = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.TopDown,
-            AutoScroll = true,
+            ColumnCount = 3,
+            BackColor = Color.Transparent,
             Margin = new Padding(0),
             Padding = new Padding(0),
-            BackColor = Color.Transparent,
         };
-        leftFlow.Controls.AddRange(new Control[]
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 12.5f)); // 左边距（等比）
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 75f));   // 内容列（所有按键等宽）
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 12.5f)); // 右边距（等比）
+
+        void AddRow(Control c, int h)
         {
-            lblCtrlTitle, _btnStart, _btnStop, _btnClearLog, _btnClearCache, _btnThinkOn, _btnTurbo,
-            lblCfgTitle, btnSlotMgmt, btnOpenConfig, _btnExportCfg, _btnImportCfg,
-            lblManualTitle, btnHelp, btnFaq, btnChangelog
-        });
-        leftPanel.Controls.Add(leftFlow);
-        leftPanel.Controls.Add(lblAppName); // Dock Top，后添加 → 位于最上
+            int row = grid.RowStyles.Count;
+            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize, h));
+            c.Dock = DockStyle.Fill; // 撑满中列 → 宽度统一
+            grid.Controls.Add(c, 1, row);
+        }
+
+        AddRow(lblAppName, 44); // 应用名与下方按键等宽
+        AddRow(lblCtrlTitle, 30);
+        AddRow(_btnStart, 34);
+        AddRow(_btnStop, 34);
+        AddRow(_btnClearLog, 30);
+        AddRow(_btnClearCache, 30);
+        AddRow(_btnThinkOn, 30);
+        AddRow(_btnTurbo, 30);
+        AddRow(lblCfgTitle, 30);
+        AddRow(btnSlotMgmt, 30);
+        AddRow(btnOpenConfig, 34);
+        AddRow(_btnExportCfg, 30);
+        AddRow(_btnImportCfg, 30);
+        AddRow(lblManualTitle, 30);
+        AddRow(btnHelp, 30);
+        AddRow(btnFaq, 30);
+        AddRow(btnChangelog, 30);
+
+        leftPanel.Controls.Add(grid);
         return leftPanel;
     }
 
@@ -621,7 +644,24 @@ public class MainForm : Form
         container.Controls.Add(host);
         container.Controls.Add(tabStrip); // Dock Top，后添加 → 位于最上
         SelectTab(0);
-        return container;
+
+        // 四周等宽边距（Percent 列/行：居中 + 四边间距相等，窗口放大时边距等比缩放）
+        var pad = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            BackColor = C_Bg,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+        };
+        pad.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 4));   // 左边距
+        pad.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 92));  // 内容
+        pad.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 4));   // 右边距
+        pad.RowStyles.Add(new RowStyle(SizeType.Percent, 4));     // 上边距
+        pad.RowStyles.Add(new RowStyle(SizeType.Percent, 92));    // 内容
+        pad.RowStyles.Add(new RowStyle(SizeType.Percent, 4));     // 下边距
+        pad.Controls.Add(container, 1, 1);
+        return pad;
     }
 
     /// <summary>扁平页签按钮（#3d3d3d 底白字，尺寸自适应文字，无边框）。</summary>
@@ -818,7 +858,7 @@ public class MainForm : Form
         AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
     };
 
-    /// <summary>左侧分组标题（small bold，黑底容器包裹——Control Panel / Configuration / User Manual 三个标签共用黑色容器底色）。</summary>
+    /// <summary>左侧分组标题（small bold，黑底容器——Control Panel / Configuration / User Manual；宽度与按键一致，由侧边栏网格中列控制）。</summary>
     private static Label MakeSectionTitle(string text) => new()
     {
         Text = $"  {text}",
@@ -828,7 +868,6 @@ public class MainForm : Form
         Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold),
         TextAlign = ContentAlignment.MiddleLeft,
         Padding = new Padding(0, 4, 0, 4), // 上下内边距，形成容器包裹感
-        Margin = new Padding(0, 12, 0, 8),
     };
 
     /// <summary>CheckBox 样式：ForeColor=黑（标签文字清晰）+ FlatStyle.Flat + BackColor=白（勾选框底色白，勾默认黑）。禁用时灰。</summary>
