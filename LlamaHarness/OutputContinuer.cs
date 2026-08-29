@@ -204,7 +204,10 @@ public static class OutputContinuer
         /// <summary>写一行到客户端；有门控时先取锁（与并发 keep-alive 互斥，防 SSE 行交错）。</summary>
         async Task ForwardAsync(string line)
         {
-            var bytes = Encoding.UTF8.GetBytes(line + "\n");
+            // SSE 规范：每个事件以空行（\n\n）结束。llama-server 原始流为 "data: {...}\n\n"，
+            // 按行拆分后空行丢失，必须在此补回，否则连续 data 行会被客户端拼成同一事件，
+            // pi-ai 严格 JSON.parse 报 "Unexpected non-whitespace character after JSON"。
+            var bytes = Encoding.UTF8.GetBytes(line + "\n\n");
             if (writeGate != null) await writeGate.WaitAsync();
             try
             {
@@ -316,7 +319,8 @@ public static class OutputContinuer
                 {
                     foreach (var h in held)
                     {
-                        var bytes = Encoding.UTF8.GetBytes(h);
+                        // held 行原始为 "line\n"（单换行），SSE 规范要求事件以 \n\n 结束，补一个 \n
+                        var bytes = Encoding.UTF8.GetBytes(h + "\n");
                         await outResp.OutputStream.WriteAsync(bytes);
                     }
                     await outResp.OutputStream.FlushAsync();
