@@ -10,4 +10,9 @@
     <AssemblyName>Llama-harness</AssemblyName>
   </PropertyGroup>
 
+  <!-- 静态资源（图标/文档/截图）：构建时拷贝到输出目录，运行时按 AppContext.BaseDirectory/static 加载 -->
+  <ItemGroup>
+    <Content Include="static/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
