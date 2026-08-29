@@ -21,6 +21,8 @@ public class MainForm : Form
     private static readonly Color C_Green = Color.FromArgb(0x27, 0xAE, 0x60);     // #27AE60 运行中
     private static readonly Color C_Red = Color.FromArgb(0xE7, 0x4C, 0x3C);       // #E74C3C 已停止/异常
     private static readonly Color C_Warn = Color.FromArgb(0xFF, 0x98, 0x00);      // #FF9800 过渡态（唤醒/休眠）
+    private static readonly Color C_Black = Color.Black;                          // #000000 侧边栏底色（层次感）
+    private static readonly Color C_Dim = Color.FromArgb(0x66, 0x66, 0x66);       // #666666 禁用按钮字体（浅灰，非黑）
 
     private readonly AppConfig _config;
     private readonly SmartScheduler _scheduler;
@@ -37,7 +39,7 @@ public class MainForm : Form
     private readonly CheckBox _chkNoKv = new() { Text = "--no-kv-unified", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
     private readonly NumericUpDown _numThreads = new() { Minimum = 1, Maximum = 512, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
     private readonly TextBox _txtExtra = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White, BorderStyle = BorderStyle.None };
-    private readonly CheckBox _chkAuto = new() { Text = "智能按需模式（推荐）", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
+    private readonly CheckBox _chkAuto = new() { Text = "智能按需模式（推荐）", AutoSize = true, ForeColor = Color.FromArgb(200, 200, 200) }; // AutoSize：紧跟"模式:"标签同行
     private readonly NumericUpDown _numIdleMin = new() { Minimum = 1, Maximum = 120, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
     private readonly TextBox _txtPcoreMask = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White, BorderStyle = BorderStyle.None };
     private readonly CheckBox _chkForceStream = new() { Text = "强制流式", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
@@ -327,7 +329,7 @@ public class MainForm : Form
 
         Shown += (_, _) =>
         {
-            mainSplit.SplitterDistance = 200; // 侧边栏固定 200px（对齐参考界面）
+            mainSplit.SplitterDistance = 240; // 侧边栏 240px（容纳按钮文字，避免滚动条）
             _contentSplit.SplitterDistance = Math.Max(500, (int)(_contentSplit.Width * 0.7)); // 7:3 分栏
         };
     }
@@ -336,13 +338,14 @@ public class MainForm : Form
     /// 按钮带参考界面 PNG 图标（static/icon），悬停变亮，对齐 Auto_Pilot 侧边栏样式。</summary>
     private Panel BuildLeftPanel()
     {
+        // 侧边栏：黑底（层次感）+ 宽度 240（容纳按钮文字，避免滚动条）
         var leftPanel = new Panel
         {
             Dock = DockStyle.Left,
-            Width = 200,
-            BackColor = C_Card,
+            Width = 240,
+            BackColor = C_Black,
             Padding = new Padding(16),
-            AutoScroll = true,
+            AutoScroll = false, // 禁用滚动条（内容高度足够容纳全部按钮）
         };
 
         // ── 应用名区（替代原顶部标题栏；扁平 Button 样式化，支持图标+文本并排）──
@@ -357,7 +360,7 @@ public class MainForm : Form
             Dock = DockStyle.Top,
             ForeColor = Color.White,
             Font = new Font("Microsoft YaHei UI", 11F, FontStyle.Bold),
-            BackColor = C_Card,
+            BackColor = C_Black, // 黑底（层次感）
             FlatStyle = FlatStyle.Flat,
             TabStop = false,
             Cursor = Cursors.Default,
@@ -638,7 +641,7 @@ public class MainForm : Form
             Padding = new Padding(12),
             AutoScroll = true,
         };
-        // 单列表格：卡片撑满右列宽度（FlowLayoutPanel 不换宽，无法对齐参考布局）
+        // 单列表格：卡片撑满右列宽度 + 等高分行（缩放时按比例分配）
         var grid = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -648,7 +651,7 @@ public class MainForm : Form
             BackColor = Color.Transparent,
         };
 
-        // 卡片工厂：#2d2d2d 底 + 标题行 + 内容标签（AutoSize 内容如模块状态按钮保持紧凑顶部停靠）
+        // 卡片工厂：#2d2d2d 底 + 标题行（加粗 11F，比内容大 2 号）+ 内容标签（垂直居中）
         Panel MakeCard(string title, Label content)
         {
             var card = new Panel
@@ -662,13 +665,13 @@ public class MainForm : Form
             {
                 Text = title,
                 Dock = DockStyle.Top,
-                Height = 24,
+                Height = 26,
                 ForeColor = C_Title,
-                Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold),
+                Font = new Font("Microsoft YaHei UI", 11F, FontStyle.Bold), // 加粗 + 比内容大 2 号
                 TextAlign = ContentAlignment.MiddleLeft,
             };
-            content.Dock = content.AutoSize ? DockStyle.Top : DockStyle.Fill; // AutoSize（模块状态按钮）保持紧凑高度
-            content.TextAlign = ContentAlignment.MiddleLeft;
+            content.Dock = DockStyle.Fill; // 等高分行下内容垂直居中
+            content.TextAlign = ContentAlignment.MiddleCenter;
             card.Controls.Add(content);
             card.Controls.Add(lblTitle); // 后添加 → Dock Top 位于最上
             return card;
@@ -687,7 +690,7 @@ public class MainForm : Form
             ForeColor = Color.White,
             BackColor = C_Red,
             Padding = new Padding(8, 4, 8, 4),
-            AutoSize = true,
+            // 注：AutoSize 已移除——等高分行下内容 Dock=Fill，标签撑满卡片（绿/红底色块）
         };
         _lblResSummary = new Label
         {
@@ -728,7 +731,8 @@ public class MainForm : Form
         };
         for (int i = 0; i < cards.Length; i++)
         {
-            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            // 等高分行：所有卡片高度相同，缩放时按比例分配（Percent 均分）
+            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / cards.Length));
             grid.Controls.Add(cards[i], 0, i);
         }
 
@@ -790,16 +794,34 @@ public class MainForm : Form
         AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
     };
 
-    /// <summary>左侧分组标题（small bold，对齐参考侧边栏 Control Panel / Configuration / User Manual 分组）。</summary>
+    /// <summary>左侧分组标题（small bold，黑底白字，对齐参考侧边栏 Control Panel / Configuration / User Manual 分组）。</summary>
     private static Label MakeSectionTitle(string text) => new()
     {
         Text = $"  {text}",
         Dock = DockStyle.Fill,
         ForeColor = C_Title,
+        BackColor = C_Black, // 黑底（层次感）
         Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold),
         TextAlign = ContentAlignment.MiddleLeft,
         Margin = new Padding(0, 12, 0, 8),
     };
+
+    /// <summary>CheckBox 样式：ForeColor=黑（标签文字清晰）+ FlatStyle.Flat + BackColor=白（勾选框底色白，勾默认黑）。禁用时灰。</summary>
+    private void ApplyBlackCheck(Control c)
+    {
+        if (c is CheckBox cb)
+        {
+            cb.ForeColor = Color.Black; // 标签文字黑色（清晰）
+            cb.FlatStyle = FlatStyle.Flat; // 扁平风格
+            cb.BackColor = Color.White; // 勾选框底色白（勾默认黑，明显）
+            // 禁用时统一灰（ApplyPhase 中处理 Enabled 切换时同步刷新）
+            cb.CheckedChanged += (_, _) =>
+            {
+                var color = cb.Enabled ? Color.Black : Color.FromArgb(0x88, 0x88, 0x88);
+                cb.ForeColor = color;
+            };
+        }
+    }
 
     /// <summary>构建 Configuration 面板（14 项配置 + 浏览按钮）。字体白色，暗色背景。</summary>
     private Control BuildConfigPanel()
@@ -807,6 +829,12 @@ public class MainForm : Form
         // 浏览按钮边框清零（对象初始化器内无法引用实例成员，在此统一设置）
         _btnBrowseExe.FlatAppearance.BorderSize = 0;
         _btnBrowseModel.FlatAppearance.BorderSize = 0;
+
+        // 文字框白字（禁用时也保持白字，清晰）+ CheckBox 勾改黑
+        foreach (var c in new[] { _txtExe, _txtModel, _txtExtra, _txtPcoreMask, _txtKvCachePath })
+            if (c is TextBox tb) tb.ForeColor = Color.White;
+        foreach (var c in new[] { _chkNoKv, _chkAuto, _chkForceStream, _chkTokenGuard, _chkContinuation, _chkCrashRecover, _chkAutoPreDshRule, _chkAutoPreWebui, _chkAutoPreTrae, _chkAutoPreDshAgent })
+            ApplyBlackCheck(c);
 
         var panel = new TableLayoutPanel
         {
@@ -869,7 +897,10 @@ public class MainForm : Form
         autoPreFlow.Controls.Add(_chkAutoPreTrae);
         autoPreFlow.Controls.Add(_chkAutoPreDshAgent);
         AddRow("自动强占:", autoPreFlow, null);
-        AddRow("模式:", _chkAuto, null);
+        // 模式行：标签 + CheckBox 同行（AutoSize 让 CheckBox 紧跟标签，不再撑满整行）
+        var chkAutoRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, BackColor = Color.Transparent };
+        chkAutoRow.Controls.Add(_chkAuto);
+        AddRow("模式:", chkAutoRow, null);
 
         _tooltip.SetToolTip(_txtExtra, "原样拼入命令行；含空格的路径需加引号");
         _tooltip.SetToolTip(_chkForceStream, "把非流式请求改写为 stream=true。仅适用于能解析 SSE 的客户端。");
@@ -1503,6 +1534,16 @@ public class MainForm : Form
             SmartScheduler.Phase.Sleeping => Color.DarkOrange,
             _ => Color.Gray, // Standby 待机
         };
+
+        // 禁用按钮字体统一浅灰（#666666），非黑——层次感更好
+        foreach (var b in new[] { _btnStart, _btnStop, _btnClearLog, _btnClearCache, _btnThinkOn, _btnTurbo, _btnExportCfg, _btnImportCfg })
+            if (b != null) b.ForeColor = b.Enabled ? Color.White : C_Dim;
+
+        // CheckBox 禁用时同步刷新为灰（启用时恢复黑）
+        var checkColor = busy ? Color.FromArgb(0x88, 0x88, 0x88) : Color.Black;
+        foreach (var c in new[] { _chkNoKv, _chkAuto, _chkForceStream, _chkTokenGuard, _chkContinuation, _chkCrashRecover, _chkAutoPreDshRule, _chkAutoPreWebui, _chkAutoPreTrae, _chkAutoPreDshAgent })
+            if (c is CheckBox cb)
+                cb.ForeColor = checkColor;
     }
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
