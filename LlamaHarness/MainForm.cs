@@ -21,7 +21,6 @@ public class MainForm : Form
     private static readonly Color C_Green = Color.FromArgb(0x27, 0xAE, 0x60);     // #27AE60 运行中
     private static readonly Color C_Red = Color.FromArgb(0xE7, 0x4C, 0x3C);       // #E74C3C 已停止/异常
     private static readonly Color C_Warn = Color.FromArgb(0xFF, 0x98, 0x00);      // #FF9800 过渡态（唤醒/休眠）
-    private static readonly Color C_Black = Color.Black;                          // #000000 侧边栏底色（层次感）
     private static readonly Color C_Dim = Color.FromArgb(0x66, 0x66, 0x66);       // #666666 禁用按钮字体（浅灰，非黑）
 
     private readonly AppConfig _config;
@@ -338,12 +337,13 @@ public class MainForm : Form
     /// 按钮带参考界面 PNG 图标（static/icon），悬停变亮，对齐 Auto_Pilot 侧边栏样式。</summary>
     private Panel BuildLeftPanel()
     {
-        // 侧边栏：黑底（层次感）+ 宽度 240（容纳按钮文字，避免滚动条）
+        // 侧边栏：#2d2d2d 深灰底（对齐参考 sidebar_bg），宽度 240（容纳按钮文字，避免滚动条）。
+        // 层次感靠灰度差异：侧栏 #2d2d2d < 按钮 #3d3d3d < 悬停 #4a4a4a，非纯黑。
         var leftPanel = new Panel
         {
             Dock = DockStyle.Left,
             Width = 240,
-            BackColor = C_Black,
+            BackColor = C_Card, // #2d2d2d
             Padding = new Padding(16),
             AutoScroll = false, // 禁用滚动条（内容高度足够容纳全部按钮）
         };
@@ -360,7 +360,7 @@ public class MainForm : Form
             Dock = DockStyle.Top,
             ForeColor = Color.White,
             Font = new Font("Microsoft YaHei UI", 11F, FontStyle.Bold),
-            BackColor = C_Black, // 黑底（层次感）
+            BackColor = C_Card, // #2d2d2d（与侧栏同色，对齐参考 DushBroad 标题区）
             FlatStyle = FlatStyle.Flat,
             TabStop = false,
             Cursor = Cursors.Default,
@@ -749,19 +749,16 @@ public class MainForm : Form
             Size = new Size(168, h),
             FlatStyle = FlatStyle.Flat,
             BackColor = C_Btn,
-            ForeColor = Color.White,
+            ForeColor = enabled ? Color.White : C_Dim, // 禁用态初始即浅灰（非黑）
             Enabled = enabled,
             Font = new Font("Microsoft YaHei UI", 9F),
-            TextAlign = ContentAlignment.MiddleCenter, // 文字居中
+            TextAlign = ContentAlignment.MiddleCenter,
+            ImageAlign = ContentAlignment.MiddleCenter,
+            TextImageRelation = TextImageRelation.ImageBeforeText, // 图标+文字整体居中
         };
         b.FlatAppearance.BorderSize = 0; // 无边框，消除白边
         var img = LoadIcon(iconFile ?? "");
-        if (img != null)
-        {
-            b.Image = img;
-            b.ImageAlign = ContentAlignment.MiddleLeft; // 图标左对齐（与文字并排时整体居中）
-            b.TextImageRelation = TextImageRelation.ImageBeforeText;
-        }
+        if (img != null) b.Image = img;
         b.MouseEnter += (_, _) => { if (b.Enabled) b.BackColor = C_BtnHover; };
         b.MouseLeave += (_, _) => { if (b.Enabled) b.BackColor = C_Btn; };
         return b;
@@ -795,13 +792,13 @@ public class MainForm : Form
         AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
     };
 
-    /// <summary>左侧分组标题（small bold，黑底白字，对齐参考侧边栏 Control Panel / Configuration / User Manual 分组）。</summary>
+    /// <summary>左侧分组标题（small bold，透明底白字——对齐参考侧边栏 Control Panel / Configuration / User Manual 分组，无独立底色块）。</summary>
     private static Label MakeSectionTitle(string text) => new()
     {
         Text = $"  {text}",
         Dock = DockStyle.Fill,
         ForeColor = C_Title,
-        BackColor = C_Black, // 黑底（层次感）
+        BackColor = Color.Transparent, // 透明底（与侧栏 #2d2d2d 融合，层次感靠按钮灰度差异）
         Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold),
         TextAlign = ContentAlignment.MiddleLeft,
         Margin = new Padding(0, 12, 0, 8),
