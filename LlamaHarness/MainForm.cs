@@ -415,7 +415,8 @@ public class MainForm : Form
     }
 
     /// <summary>从 static/icon 加载图标并缩放到 16x16（缓存；文件缺失返回 null → 按钮降级纯文本）。
-    /// 参考图标原始尺寸 300px+，必须缩放，否则挤占按钮文字区域。</summary>
+    /// 参考图标原始尺寸 300px+，必须缩放，否则挤占按钮文字区域。
+    /// 黑色图标自动反转为白色（统一深色主题下的图标颜色）。</summary>
     private static Image? LoadIcon(string fileName)
     {
         if (IconCache.TryGetValue(fileName, out var cached)) return cached;
@@ -428,6 +429,18 @@ public class MainForm : Form
                 var img = new Bitmap(16, 16);     // 缩放到 16x16（侧边栏按钮图标标准尺寸）
                 using (var g = Graphics.FromImage(img))
                     g.DrawImage(src, 0, 0, 16, 16);
+
+                // 黑色图标 → 白色：逐像素反转（R/G/B 取反），透明像素保持透明
+                for (int y = 0; y < 16; y++)
+                {
+                    for (int x = 0; x < 16; x++)
+                    {
+                        var p = img.GetPixel(x, y);
+                        if (p.A > 0) // 非透明像素才处理
+                            img.SetPixel(x, y, Color.FromArgb(p.A, 255 - p.R, 255 - p.G, 255 - p.B));
+                    }
+                }
+
                 IconCache[fileName] = img;
                 return img;
             }
