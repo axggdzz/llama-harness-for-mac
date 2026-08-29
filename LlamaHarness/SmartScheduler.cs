@@ -931,7 +931,12 @@ public sealed class SmartScheduler : IDisposable
         if (resp.IsSuccessStatusCode)
         {
             if (effStreaming)
+            {
+                // SSE 流式响应：必须设置 text/event-stream（llama-server 返回 application/json，
+                // 直接复制会导致客户端按 JSON 解析 SSE 行报错 "Unexpected non-whitespace character after JSON"）
+                outResp.ContentType = "text/event-stream";
                 (completed, accumulated) = await OutputContinuer.HandleStreamAsync(_hc, uri, _backendPort, finalBody, resp, outResp, _cfg, log2, onTrunc);
+            }
             else
                 (completed, accumulated) = await OutputContinuer.HandleNonStreamAsync(_hc, uri, _backendPort, finalBody, resp, outResp, _cfg, log2, _cfg.CrashRecoveryEnabled);
         }
