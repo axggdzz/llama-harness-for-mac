@@ -995,7 +995,7 @@ public class MainForm : Form
     }
 
     /// <summary>按当前启动附加参数刷新思考模式标签（仅显示；权威重置在 SmartScheduler 唤醒时执行）。
-    /// enable_thinking:true → XHigh；false → Off；无该参数 → 默认开启（XHigh）。</summary>
+    /// --reasoning on → XHigh；--reasoning off 或无该参数 → Off（默认不思考）。</summary>
     private void RefreshThinkingLabel()
     {
         UpdateThinkingLabel(SmartScheduler.DetermineInitialThinkingMode(_config.ExtraArgs));

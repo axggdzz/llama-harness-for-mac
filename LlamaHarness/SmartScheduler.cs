@@ -113,16 +113,16 @@ public sealed class SmartScheduler : IDisposable
     private bool _sleepPreparing;
 
     /// <summary>从启动附加参数判定初始思考档位：
-    /// enable_thinking:true → XHigh；enable_thinking:false → Off；无该参数 → 默认开启（XHigh）。
-    /// 兼容转义引号写法：--chat-template-kwargs "{\"enable_thinking\":false}"。</summary>
+    /// --reasoning on → XHigh（深度推理）；--reasoning off 或无该参数 → Off（默认不思考）。
+    /// 注意：仅显式 on 才开启思考，避免默认注入深度思考干扰严格 JSON 类请求（如意图分类器）。</summary>
     public static ThinkingLevel DetermineInitialThinkingMode(string extraArgs)
     {
-        if (string.IsNullOrWhiteSpace(extraArgs)) return ThinkingLevel.XHigh; // 无参数 = 默认开启
+        if (string.IsNullOrWhiteSpace(extraArgs)) return ThinkingLevel.Off; // 无参数 = 默认不思考
         var m = System.Text.RegularExpressions.Regex.Match(
             extraArgs,
-            @"enable_thinking\\?""?\s*:\s*(true|false)",
+            @"--reasoning\s+(on|off)",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        return (!m.Success || m.Groups[1].Value.Equals("true", StringComparison.OrdinalIgnoreCase))
+        return (m.Success && m.Groups[1].Value.Equals("on", StringComparison.OrdinalIgnoreCase))
             ? ThinkingLevel.XHigh
             : ThinkingLevel.Off;
     }
@@ -455,15 +455,12 @@ public sealed class SmartScheduler : IDisposable
             ThinkingModeChanged?.Invoke(baseLevel);
             Log?.Invoke($"思考模式基线：「{LabelOf(baseLevel)}」（{(EffortOf(baseLevel) is var be && be != null ? $"reasoning_effort={be}, " : "")}enable_thinking={(baseLevel == ThinkingLevel.Off ? "false" : "true")}）。");
 
-            // 槽位亲和：--parallel > 1 时启用（单进程多槽共享 KV 池，指纹绑定 + n_slots 路由）
-            _affinity = _cfg.Parallel > 1 ? new SlotAffinity(_cfg.Parallel) : null;
-            if (_affinity != null)
-                Log?.Invoke($"槽位亲和已启用：{_cfg.Parallel} 槽，指纹绑定 + n_slots 路由（绑定表 slot_bindings.json，LRU 驱逐）。");
-            else
-                Log?.Invoke("槽位亲和未启用（--parallel=1，单槽无需路由）。");
+            // 槽位亲和：始终启用（单槽/多槽均激活），指纹绑定 + n_slots 路由
+            _affinity = new SlotAffinity(_cfg.Parallel);
+            Log?.Invoke($"槽位亲和已启用：{_cfg.Parallel} 槽，指纹绑定 + n_slots 路由（绑定表 slot_bindings.json，LRU 驱逐）。");
 
-            // KV Cache 持久化：--parallel > 1 且 KvCachePath 非空时启用（驱逐 save / 重绑定 restore / 休眠前 save / 唤醒后 restore）
-            _kvCache = (_affinity != null && !string.IsNullOrWhiteSpace(_cfg.KvCachePath))
+            // KV Cache 持久化：KvCachePath 非空时启用（驱逐 save / 重绑定 restore / 休眠前 save / 唤醒后 restore）
+            _kvCache = !string.IsNullOrWhiteSpace(_cfg.KvCachePath)
                 ? new KvCacheManager(_hc, _cfg.KvCachePath, _cfg.Parallel, srvPort)
                 : null;
             if (_kvCache != null)
@@ -627,10 +624,10 @@ public sealed class SmartScheduler : IDisposable
                 ThinkingModeChanged?.Invoke(lvl);
             }
             if (effortFix != null)
-                Log?.Invoke($"reasoning_effort 参数修正：{effortFix}（模型模板仅支持 low/medium/xhigh）。");
+                Log?.Invoke($"思考参数清洗：{effortFix}。");
         }
 
-        // 槽位亲和路由（--parallel>1）：注入 n_slots 固定槽位；槽忙时 llama.cpp 原生排队，不跨槽漂移
+        // 槽位亲和路由（单槽/多槽均启用）：指纹绑定 + 注入 n_slots 固定槽位；槽忙时 llama.cpp 原生排队，不跨槽漂移
         var aff = _affinity;
         if (aff != null && p.Contains("completion", StringComparison.OrdinalIgnoreCase))
         {
@@ -1395,19 +1392,21 @@ public sealed class SmartScheduler : IDisposable
     ///    - 「关闭思考模式」→ Off；
     ///    - 「开启轻度推理模式」→ Low；「开启中度推理模式」→ Medium；「开启深度推理模式」→ XHigh。
     ///    命中 → 设置全局档位，剥离指令文本（避免模型把指令当问题回答）。
-    /// 2. 普通请求：Off → 不注入（沿用服务端启动参数）；Low/Medium/XHigh → 注入对应 reasoning_effort + enable_thinking=true。
-    /// 3. 校验修正：客户端可能发送模板不支持的 reasoning_effort（如 high/veryhigh），自动映射为 low/medium/xhigh。
+    /// 2. 统一清洗：移除请求体中客户端自带的 chat_template_kwargs.reasoning_effort / enable_thinking
+    ///    （网关代理层统一管控思考参数，不信任客户端自行携带的值）。
+    /// 3. 按状态机注入：Off → 不注入；Low/Medium/XHigh → 注入对应 reasoning_effort + enable_thinking=true。
     /// DOM 解析失败时透传原始请求（返回 null）。
     /// </summary>
     /// <param name="json">请求体 JSON</param>
     /// <param name="level">当前全局思考档位（ref：指令命中时更新）</param>
-    /// <param name="effortFix">reasoning_effort 修正描述（如 "high → xhigh"）；null = 无需修正</param>
+    /// <param name="effortFix">清洗/注入描述（如 "已清洗客户端 reasoning_effort=high"）；null = 无需说明</param>
     /// <returns>改写后的 JSON；null = 无需改写或解析失败，调用方透传。</returns>
     public static string? InjectThinkingMode(string json, ref ThinkingLevel level, out string? effortFix)
     {
         effortFix = null;
-        // 快速路径：Off 态且无指令文本且无 reasoning_effort → 不注入也不识别，无需解析
-        if (level == ThinkingLevel.Off && !ContainsAnyInstruction(json) && !json.Contains("reasoning_effort"))
+        // 快速路径：Off 态且无指令文本且无需要清洗的字段 → 无需解析
+        if (level == ThinkingLevel.Off && !ContainsAnyInstruction(json)
+            && !json.Contains("reasoning_effort") && !json.Contains("enable_thinking"))
             return null;
         try
         {
@@ -1455,7 +1454,17 @@ public sealed class SmartScheduler : IDisposable
                 }
             }
 
-            // 2. 注入：Off → 不注入；Low/Medium/XHigh → 注入对应 reasoning_effort + enable_thinking=true
+            // 2. 统一清洗：移除客户端自带的 reasoning_effort / enable_thinking（网关层统一管控）
+            bool cleaned = false;
+            if (obj["chat_template_kwargs"] is System.Text.Json.Nodes.JsonObject ctkExisting)
+            {
+                if (ctkExisting.Remove("reasoning_effort")) cleaned = true;
+                if (ctkExisting.Remove("enable_thinking")) cleaned = true;
+                // 清洗后若 chat_template_kwargs 为空对象，移除空壳（避免下发无意义字段）
+                if (ctkExisting.Count == 0) obj.Remove("chat_template_kwargs");
+            }
+
+            // 3. 按状态机注入：Off → 不注入；Low/Medium/XHigh → 注入对应 reasoning_effort + enable_thinking=true
             var effort = EffortOf(level);
             if (effort != null)
             {
@@ -1473,48 +1482,17 @@ public sealed class SmartScheduler : IDisposable
                 ctk["enable_thinking"] = true;
             }
 
-            // 3. 校验修正：客户端可能发送模板不支持的 reasoning_effort（high/veryhigh/minimal/off...）
-            bool effortFixed = false;
-            if (obj["chat_template_kwargs"] is System.Text.Json.Nodes.JsonObject ctk2
-                && ctk2["reasoning_effort"] != null)
-            {
-                string effStr = "";
-                try { effStr = ctk2["reasoning_effort"]!.GetValue<string>(); } catch { /* 非字符串值：跳过 */ }
-                var fix = NormalizeReasoningEffort(effStr);
-                if (fix != null)
-                {
-                    if (string.IsNullOrEmpty(fix)) ctk2.Remove("reasoning_effort"); // off/none/false → 移除字段
-                    else ctk2["reasoning_effort"] = fix;
-                    effortFix = $"{effStr} → {(string.IsNullOrEmpty(fix) ? "已移除" : fix)}";
-                    effortFixed = true;
-                }
-            }
+            // 清洗说明（用于日志）
+            if (cleaned)
+                effortFix = "已清洗客户端思考参数（reasoning_effort/enable_thinking），按网关状态机重新注入";
 
-            return hit || level != ThinkingLevel.Off || effortFixed ? obj.ToJsonString() : null;
+            return hit || cleaned || level != ThinkingLevel.Off ? obj.ToJsonString() : null;
         }
         catch
         {
             // DOM 解析失败（非法 JSON），透传原始请求
             return null;
         }
-    }
-
-    /// <summary>
-    /// 校验 reasoning_effort：模型模板仅支持 low/medium/xhigh。
-    /// 合法值返回 null（无需修正）；非法值返回修正后的值，空串 = 应移除字段。
-    /// </summary>
-    public static string? NormalizeReasoningEffort(string effort)
-    {
-        var v = effort.Trim().ToLowerInvariant();
-        return v switch
-        {
-            "low" or "medium" or "xhigh" => null,          // 合法，不动
-            "high" or "veryhigh" or "very_high" or "deep"
-                or "max" or "extreme" => "xhigh",           // 高深度类 → xhigh
-            "minimal" or "small" or "tiny" => "low",        // 低深度类 → low
-            "off" or "none" or "false" or "" => "",          // 关闭意图 → 移除字段
-            _ => "medium",                                  // 未知值 → 安全中档
-        };
     }
 
     /// <summary>是否含任一思考/推理指令文本（快速路径判断用）。</summary>

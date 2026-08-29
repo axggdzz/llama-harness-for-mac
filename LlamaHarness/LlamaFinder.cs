@@ -77,8 +77,8 @@ public static class LlamaFinder
         sb.Append($" -c {cfg.CtxSize}");
         sb.Append($" -ngl {cfg.Ngl}");
         sb.Append($" --parallel {cfg.Parallel}");
-        // KV Cache 持久化：多槽 + 配置了缓存路径时，启用 /slots 端点 + 指定保存目录
-        if (cfg.Parallel > 1 && !string.IsNullOrWhiteSpace(cfg.KvCachePath))
+        // KV Cache 持久化：配置了缓存路径时，启用 /slots 端点 + 指定保存目录（单槽/多槽均需要）
+        if (!string.IsNullOrWhiteSpace(cfg.KvCachePath))
         {
             sb.Append(" --slots");
             sb.Append($" --slot-save-path \"{cfg.KvCachePath.Trim()}\""); // 引号包裹：路径含空格（如 "C:\temp cache"）不致断裂
