@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -64,7 +65,8 @@ public static class TokenGuard
         }
         if (messages == null || messages.Count == 0) return (true, body, null);
 
-        int count = await CountTokensAsync(hc, backendPort, body) ?? -1;
+        // O-14：计数口径对齐——送 messages 文本（role+content）tokenize，而非原始 body（含 model/temperature 等非上下文字段，计数偏高）
+        int count = await CountTokensAsync(hc, backendPort, BuildMessagesText(messages)) ?? -1;
         if (count < 0) return (true, body, null); // tokenize 失败：降级原样转发
         int origCount = count;
         if (count <= budget) return (true, body, null);
@@ -89,7 +91,7 @@ public static class TokenGuard
             turnStarts.RemoveAt(0);
             deletedTurns++;
             body = root.ToJsonString();
-            count = await CountTokensAsync(hc, backendPort, body) ?? -1;
+            count = await CountTokensAsync(hc, backendPort, BuildMessagesText(messages)) ?? -1;
             if (count < 0) return (true, body, null); // 中途降级：用当前状态
         }
 
@@ -103,9 +105,13 @@ public static class TokenGuard
                 if (content == null || content.Length < 200) break; // 无可再裁的内容
                 double ratio = Math.Max(0.1, 1.0 - (count - (double)budget) / count);
                 int newLen = Math.Max(50, (int)(content.Length * ratio));
-                SetContent(messages[maxIdx], content.Substring(0, newLen) + "\n[已截断 - Token Guard]");
+                // O-14：头尾双保留（头部留上下文、尾部留最新信息），替代纯头部截断
+                int half = newLen / 2;
+                int tail = newLen - half;
+                string kept = content[..half] + "\n[…]\n" + content[^tail..];
+                SetContent(messages[maxIdx], kept + "\n[已截断 - Token Guard]");
                 body = root.ToJsonString();
-                count = await CountTokensAsync(hc, backendPort, body) ?? -1;
+                count = await CountTokensAsync(hc, backendPort, BuildMessagesText(messages)) ?? -1;
                 if (count < 0) return (true, body, null);
             }
         }
@@ -121,6 +127,23 @@ public static class TokenGuard
     }
 
     // ── 辅助 ──
+
+    /// <summary>O-14：构造送 tokenize 的计数文本——逐条拼接 role + content（与上下文消耗口径对齐）。</summary>
+    private static string BuildMessagesText(JsonArray messages)
+    {
+        var sb = new StringBuilder();
+        foreach (var m in messages)
+        {
+            var o = m?.AsObject();
+            if (o == null) continue;
+            var role = o["role"]?.GetValue<string>() ?? "";
+            var c = o["content"];
+            string? content = null;
+            try { content = c?.GetValue<string>(); } catch { /* 数组型 content */ }
+            sb.Append(role).Append(": ").Append(content ?? c?.ToJsonString() ?? "").Append("\n");
+        }
+        return sb.ToString();
+    }
 
     /// <summary>取消息 role 字段；null = 非对象。</summary>
     private static string? RoleOf(JsonNode msg) => msg?.AsObject()?["role"]?.GetValue<string>();

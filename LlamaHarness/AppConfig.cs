@@ -50,9 +50,39 @@ public class AppConfig
     public int RecoveryKeepAliveIntervalSeconds { get; set; } = 5;
     /// <summary>自动强占（冻结防驱逐）的应用类型前缀，逗号分隔。key 匹配任一前缀 → 槽位不可被 LRU 驱逐（§4.2）。默认持久 Agent 会话类。</summary>
     public string AutoPreemptiveApps { get; set; } = "dsh_agent_global,trae_global";
+    /// <summary>请求体 dump 开关（应用识别分析用）：每个 POST 的原始 body + headers 落盘 request_dump.log。默认关闭——防 prompt 隐私落盘与无谓 IO（审计 O-18）。</summary>
+    public bool RequestDumpEnabled { get; set; } = false;
 
     private static string ConfigPath => Path.Combine(AppContext.BaseDirectory, "config.json");
-    private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
+
+    /// <summary>审计：config.json 字段命名统一 snake_case_lower（此前仅 schema_version 为 snake，其余 PascalCase）。</summary>
+    private sealed class SnakeCaseNamingPolicy : System.Text.Json.JsonNamingPolicy
+    {
+        public override string ConvertName(string name)
+        {
+            var sb = new System.Text.StringBuilder(name.Length);
+            for (int i = 0; i < name.Length; i++)
+            {
+                char c = name[i];
+                if (char.IsUpper(c))
+                {
+                    if (i > 0) sb.Append('_');
+                    sb.Append(char.ToLowerInvariant(c));
+                }
+                else sb.Append(c);
+            }
+            return sb.ToString();
+        }
+    }
+
+    private static readonly JsonSerializerOptions JsonOpts = new()
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = new SnakeCaseNamingPolicy(),
+    };
+
+    /// <summary>旧版 config.json 为 PascalCase 字段名：仅用于兼容读取；保存一律写新 snake_case 格式。</summary>
+    private static readonly JsonSerializerOptions LegacyJsonOpts = new() { WriteIndented = true };
 
     /// <summary>加载配置；文件不存在返回默认值，损坏则回退默认值并通过 out 报告错误。</summary>
     public static AppConfig Load(out string? loadError)
@@ -63,7 +93,10 @@ public class AppConfig
             if (!File.Exists(ConfigPath))
                 return new AppConfig();
 
-            var cfg = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(ConfigPath), JsonOpts);
+            var json = File.ReadAllText(ConfigPath);
+            // 兼容：旧版 config.json 为 PascalCase 字段名（新版统一 snake_case_lower）；按字段名探测选择反序列化选项
+            var opts = json.Contains("\"ExePath\"") ? LegacyJsonOpts : JsonOpts;
+            var cfg = JsonSerializer.Deserialize<AppConfig>(json, opts);
             if (cfg == null)
                 throw new InvalidOperationException("反序列化结果为空");
 

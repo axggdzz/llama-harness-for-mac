@@ -56,10 +56,13 @@ public sealed class LlamaServerProcess : IDisposable
         {
             if (e.Data != null) OutputLine?.Invoke(e.Data);
         };
-        _proc.Exited += (_, _) =>
+        // 局部捕获当前进程对象：极端时序下（快速重启）事件晚于字段替换触发，
+        // 读 _proc 字段可能拿到新进程导致退出码错配（审计加固）
+        var proc = _proc;
+        proc.Exited += (_, _) =>
         {
             int code = 0;
-            try { code = _proc.ExitCode; } catch { /* 极端情况下取不到 */ }
+            try { code = proc.ExitCode; } catch { /* 极端情况下取不到 */ }
             Exited?.Invoke(this, code);
         };
 
@@ -72,14 +75,15 @@ public sealed class LlamaServerProcess : IDisposable
     public void Stop()
     {
         var p = _proc;
-        if (p is null || p.HasExited) return;
+        if (p is null) return;
         try
         {
+            if (p.HasExited) return; // HasExited 检查移入 try：_proc 已 Dispose 时不再抛 ObjectDisposedException
             p.Kill(entireProcessTree: true);
         }
         catch
         {
-            // 进程可能刚好自行退出，忽略
+            // 进程可能刚好自行退出，或对象已释放，忽略
         }
     }
 

@@ -266,15 +266,8 @@ public sealed class SlotAffinity
 
     private static bool TryGetHeader(NameValueCollection h, string name, out string value)
     {
-        value = "";
-        try
-        {
-            value = h[name] ?? "";
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
+        // NameValueCollection 索引器对缺失键返回 null 而不抛异常，无需 try/catch（审计：原死防御删除）
+        value = h[name] ?? "";
+        return true;
     }
 }

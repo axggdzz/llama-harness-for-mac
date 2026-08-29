@@ -39,8 +39,9 @@ public sealed class SystemMetrics
 
     private ulong _prevIdle, _prevKernel, _prevUser;
     private bool _hasSample;
-    private string? _nvSmiPath;      // 启动时解析一次，找不到则显存恒为 null
-    private bool _nvSmiChecked;
+
+    /// <summary>nvidia-smi 路径（Lazy：首次使用解析一次，之后全项目共享；找不到为 null 恒定）。</summary>
+    private static readonly Lazy<string?> NvSmiPath = new(ResolveNvidiaSmi);
 
     /// <summary>整机 CPU 占用百分比（基于上次调用的差值）。</summary>
     public double GetCpuPercent()
@@ -73,20 +74,34 @@ public sealed class SystemMetrics
     /// <summary>GPU 显存（"已用MB/总量MB"）；无 nvidia-smi 或查询失败/挂起返回 null。</summary>
     public async Task<string?> GetVramTextAsync()
     {
-        if (!_nvSmiChecked)
-        {
-            _nvSmiPath = ResolveNvidiaSmi();
-            _nvSmiChecked = true;
-        }
-        if (_nvSmiPath == null) return null;
+        var line = await RunNvidiaSmiAsync("--query-gpu=memory.used,memory.total --format=csv,noheader,nounits");
+        if (string.IsNullOrWhiteSpace(line)) return null;
+        var parts = line.Split(',', 2);
+        if (parts.Length < 2) return null;
+        return $"{parts[0].Trim()}/{parts[1].Trim()} MB";
+    }
+
+    /// <summary>C-006：查询 GPU 已用显存（MB），供休眠后校验显存是否释放；nvidia-smi 不可用/失败返回 null。</summary>
+    public static async Task<int?> GetVramUsedMbAsync()
+    {
+        var line = await RunNvidiaSmiAsync("--query-gpu=memory.used --format=csv,noheader,nounits");
+        var v = line?.Trim().Split(',')[0]?.Trim();
+        return int.TryParse(v, out var mb) ? mb : null;
+    }
+
+    /// <summary>共享 nvidia-smi 查询：3 秒超时执行并取输出首行；路径缺失/失败/挂起返回 null。</summary>
+    private static async Task<string?> RunNvidiaSmiAsync(string args)
+    {
+        var path = NvSmiPath.Value;
+        if (path == null) return null;
         try
         {
-            var psi = new ProcessStartInfo(_nvSmiPath)
+            var psi = new ProcessStartInfo(path)
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
-                Arguments = "--query-gpu=memory.used,memory.total --format=csv,noheader,nounits",
+                Arguments = args,
             };
             using var p = Process.Start(psi)!;
             // nvidia-smi 可能挂起（驱动忙）：3 秒超时放弃本轮并杀进程，防线程堆积
@@ -101,48 +116,11 @@ public sealed class SystemMetrics
             }
             string? line = await lineTask;
             p.WaitForExit(5000);
-            if (string.IsNullOrWhiteSpace(line)) return null;
-            var parts = line.Split(',', 2);
-            if (parts.Length < 2) return null;
-            return $"{parts[0].Trim()}/{parts[1].Trim()} MB";
+            return line;
         }
         catch
         {
             return null; // nvidia-smi 异常（驱动未就绪等），UI 显示 "—"
-        }
-    }
-
-    /// <summary>C-006：查询 GPU 已用显存（MB），供休眠后校验显存是否释放；nvidia-smi 不可用/失败返回 null。</summary>
-    public static async Task<int?> GetVramUsedMbAsync()
-    {
-        try
-        {
-            var path = ResolveNvidiaSmi();
-            if (path == null) return null;
-            var psi = new ProcessStartInfo(path)
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                Arguments = "--query-gpu=memory.used --format=csv,noheader,nounits",
-            };
-            using var p = Process.Start(psi)!;
-            var lineTask = p.StandardOutput.ReadLineAsync();
-            var finished = await Task.WhenAny(lineTask, Task.Delay(3000));
-            if (finished != lineTask)
-            {
-                try { p.Kill(); } catch { }
-                p.WaitForExit(3000); // C-004：Kill 后回收进程对象
-                return null;
-            }
-            string? line = await lineTask;
-            p.WaitForExit(5000);
-            var v = line?.Trim().Split(',')[0]?.Trim();
-            return int.TryParse(v, out var mb) ? mb : null;
-        }
-        catch
-        {
-            return null;
         }
     }
 

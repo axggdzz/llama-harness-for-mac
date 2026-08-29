@@ -25,13 +25,13 @@ public static class LlamaFinder
             }
         }
 
-        // 2. PATH 环境变量
+        // 2. PATH 环境变量（条目去引号：形如 "C:\my tools";D:\bin 的 PATH 写法合法）
         var pathVar = Environment.GetEnvironmentVariable("PATH") ?? "";
         foreach (var dir in pathVar.Split(';', StringSplitOptions.RemoveEmptyEntries))
         {
             try
             {
-                var candidate = Path.Combine(dir.Trim(), "llama-server.exe");
+                var candidate = Path.Combine(dir.Trim().Trim('"'), "llama-server.exe");
                 if (File.Exists(candidate)) return candidate;
             }
             catch

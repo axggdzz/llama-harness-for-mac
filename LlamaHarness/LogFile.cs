@@ -46,7 +46,7 @@ public static class LogFile
         if (line.Contains("警告")) return Level.Warn;
         var m = SeverityRe.Match(line);
         if (m.Success)
-            return m.Groups[1].Value.ToUpper() switch
+            return m.Groups[1].Value switch // 正则字符类 [IWE] 只匹配大写，无需 ToUpper
             {
                 "E" => Level.Error,
                 "W" => Level.Warn,

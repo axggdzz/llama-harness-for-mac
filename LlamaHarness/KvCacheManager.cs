@@ -9,7 +9,7 @@ namespace LlamaHarness;
 /// - 重绑定 restore：POST /slots/{id}?action=restore，从 {key}.bin 恢复槽位 KV
 /// - 擦除：POST /slots/{id}?action=erase
 /// - 清空缓存：删除缓存目录下所有 *.bin + erase 全部槽位
-/// 异步 + 完成标记（_savingKeys），restore 前检查 save 是否完成。
+/// 异步 + 在途去重（_inflightSaves），restore 前检查 save 是否完成。
 /// </summary>
 public sealed class KvCacheManager
 {
@@ -19,7 +19,6 @@ public sealed class KvCacheManager
     private readonly int _backendPort;
     private readonly object _gate = new();
     private readonly Dictionary<string, Task> _inflightSaves = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _savingKeys = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>缓存索引持久化文件（exe 同目录）。</summary>
     private static readonly string IndexPath = Path.Combine(AppContext.BaseDirectory, "kv_cache_index.json");
@@ -94,20 +93,19 @@ public sealed class KvCacheManager
     /// 保存槽位 KV 到 {key}.bin（异步 + 完成标记）。
     /// 同一 key 的并发 save 复用同一 Task（防重复）。
     /// </summary>
-    public Task SaveAsync(int slot, string key)
+    public Task SaveAsync(int slot, string key, CancellationToken ct = default)
     {
         lock (_gate)
         {
             if (_inflightSaves.TryGetValue(key, out var existing))
                 return existing; // 复用进行中的 save
-            var task = DoSaveAsync(slot, key);
+            var task = DoSaveAsync(slot, key, ct);
             _inflightSaves[key] = task;
-            _savingKeys.Add(key);
             return task;
         }
     }
 
-    private async Task DoSaveAsync(int slot, string key)
+    private async Task DoSaveAsync(int slot, string key, CancellationToken ct)
     {
         try
         {
@@ -115,7 +113,7 @@ public sealed class KvCacheManager
             var json = JsonSerializer.Serialize(body);
             var content = new ByteArrayContent(Encoding.UTF8.GetBytes(json));
             content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
-            var resp = await _http.PostAsync(SlotUrl(slot, "save"), content, CancellationToken.None);
+            var resp = await _http.PostAsync(SlotUrl(slot, "save"), content, ct);
             var text = await resp.Content.ReadAsStringAsync();
             if (resp.IsSuccessStatusCode)
             {
@@ -140,7 +138,6 @@ public sealed class KvCacheManager
         {
             lock (_gate)
             {
-                _savingKeys.Remove(key);
                 _inflightSaves.Remove(key);
             }
         }
@@ -204,8 +201,12 @@ public sealed class KvCacheManager
             try { await EraseAsync(i); } catch { /* 忽略 */ }
         }
 
-        _index.Clear();
-        SaveIndex();
+        // O-17：_index 变更统一在 lock(_gate) 内（与 RecordSave/Snapshot/LoadIndex 一致）
+        lock (_gate)
+        {
+            _index.Clear();
+            SaveIndex();
+        }
         return deleted;
     }
 
@@ -227,12 +228,6 @@ public sealed class KvCacheManager
             return _index.Select(kv => (kv.Key, kv.Value.Slot, kv.Value.SavedAt, kv.Value.NTokens, kv.Value.SizeBytes))
                           .OrderByDescending(t => t.SavedAt).ToList();
         }
-    }
-
-    /// <summary>正在 save 的 key 集合（UI 状态展示用）。</summary>
-    public IEnumerable<string> SavingKeys
-    {
-        get { lock (_gate) { return _savingKeys.ToArray(); } }
     }
 
     private void LoadIndex()

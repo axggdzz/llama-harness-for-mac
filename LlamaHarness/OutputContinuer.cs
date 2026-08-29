@@ -131,20 +131,27 @@ public static class OutputContinuer
         bool sawDone = false;
         var chunk = new byte[8192];
 
+        // 单遍扫描：只从上次扫描位置继续找换行，行处理完批量移除头部（原实现每找到一行就 RemoveRange+从头重扫，O(n²)）
+        int lineStart = 0;   // 当前未处理行的起始下标
+        int scanFrom = 0;    // 下一轮扫描起点（上次扫描到的位置）
         while (true)
         {
             int n = await stream.ReadAsync(chunk);
             if (n <= 0) break;
             for (int j = 0; j < n; j++) pending.Add(chunk[j]);
-            int start = 0;
-            for (int i = 0; i < pending.Count; i++)
+            for (int i = scanFrom; i < pending.Count; i++)
             {
                 if (pending[i] != (byte)'\n') continue;
-                var line = DecodeLine(pending, start, i);
+                var line = DecodeLine(pending, lineStart, i);
                 await HandleSseLineAsync(line);
-                pending.RemoveRange(start, i - start + 1);
-                start = 0;
-                i = -1; // 列表已变，重扫
+                lineStart = i + 1;
+            }
+            scanFrom = pending.Count; // 已扫到末尾，下轮从新追加的字节继续
+            if (lineStart > 0)
+            {
+                pending.RemoveRange(0, lineStart); // 批量移除已处理字节，未完整行保留在头部
+                lineStart = 0;
+                scanFrom = pending.Count;
             }
         }
         if (pending.Count > 0)

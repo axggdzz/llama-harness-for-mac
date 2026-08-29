@@ -114,8 +114,15 @@ public class MainForm : Form
 
     // —— 槽位绑定表格（TabControl 页签3）——
     private DataGridView _gridSlots;
-    // —— 槽位管理表格（TabControl 页签6，强占/KV缓存可编辑）——
+    // —— 槽位管理页签/表格（TabControl 页签4，强占/KV缓存可编辑）——
+    private TabPage _tabSlotMgmt;
     private DataGridView _gridSlotMgmt;
+    // —— 配置管理页签（TabControl 页签6）——
+    private TabPage _tabConfig;
+    // —— 参数控件清单（BuildUi 一次构建；ApplyPhase 按相位批量启停，审计：原实现每次调用重建数组）——
+    private Control[] _paramControls;
+    // —— 槽位管理表 key→行索引（审计：原实现每轮刷新线性扫 Tag，O(n²)）——
+    private readonly Dictionary<string, int> _slotMgmtRowIdx = new(StringComparer.Ordinal);
     // —— 槽位日志（槽位绑定页下方，独立持久化 slot.log）——
     private RichTextBox _txtSlotLog;
 
@@ -241,14 +248,64 @@ public class MainForm : Form
         var cTitle = Color.FromArgb(0xF5, 0xF7, 0xFA);    // #F5F7FA 一级标题
         var cBody = Color.FromArgb(0xC9, 0xCD, 0xD4);     // #C9CDD4 二级正文
         var cAux = Color.FromArgb(0x86, 0x90, 0x9C);      // #86909C 辅助说明
-        var cBorder = Color.FromArgb(30, 35, 45);         // rgba(255,255,255,0.08) 近似
-        var cGreen = Color.FromArgb(0x52, 0xC4, 0x1A);    // #52C41A 正常
         var cRed = Color.FromArgb(0xF5, 0x3F, 0x3F);      // #F53F3F 异常
 
         BackColor = cBg;
         ForeColor = cBody;
 
-        // ════════════ 左侧面板 (240px) ════════════
+        var tabControl = BuildTabs(cBg, cCard, cBody);
+        var leftPanel = BuildLeftPanel(tabControl, cCard, cBody, cAux, cPrimary, cRed);
+        var titleBar = BuildTitleBar(cCard, cPrimary, cAux);
+        var sidePanel = BuildSidePanel(cBottom, cCard, cTitle, cBody, cPrimary);
+
+        // 参数控件清单一次构建（审计：原实现每次 ApplyPhase 调用都重建数组）
+        _paramControls = new Control[]
+        {
+            _txtExe, _btnBrowseExe, _txtModel, _btnBrowseModel,
+            _numPort, _numCtx, _numNgl, _numParallel, _chkNoKv, _numThreads, _txtExtra,
+            _chkAuto, _numIdleMin, _txtPcoreMask, _chkForceStream, _txtKvCachePath,
+            _chkTokenGuard, _numReservedTokens,
+            _chkContinuation, _numMaxContinuations, _numContTimeout,
+            _chkCrashRecover, _numMaxRestarts,
+            _chkAutoPreDshRule, _chkAutoPreWebui, _chkAutoPreTrae, _chkAutoPreDshAgent,
+            _btnExportCfg, _btnImportCfg, // 运行中禁止导入/导出，避免改参冲突
+        };
+
+        var rightSplit = new SplitContainer
+        {
+            Dock = DockStyle.Fill,
+            Orientation = Orientation.Horizontal,
+            SplitterWidth = 4,
+            BackColor = cBg,
+        };
+        var tabHost = new Panel { Dock = DockStyle.Fill, BackColor = cBg };
+        tabHost.Controls.Add(tabControl);
+        rightSplit.Panel1.Controls.Add(tabHost);
+        rightSplit.Panel1.Controls.Add(titleBar);
+        rightSplit.Panel2.Controls.Add(sidePanel);
+
+        // ════════════ 主布局 ════════════
+        var mainSplit = new SplitContainer
+        {
+            Dock = DockStyle.Fill,
+            Orientation = Orientation.Vertical,
+            SplitterWidth = 4,
+            BackColor = cBg,
+        };
+        mainSplit.Panel1.Controls.Add(leftPanel);
+        mainSplit.Panel2.Controls.Add(rightSplit);
+        Controls.Add(mainSplit);
+
+        Shown += (_, _) =>
+        {
+            mainSplit.SplitterDistance = 240;
+            rightSplit.SplitterDistance = Math.Max(rightSplit.Height - 200, 100);
+        };
+    }
+
+    /// <summary>左侧面板 (240px)：Control Panel + Configuration + User Manual。按钮直接赋值字段（审计：删除原回填段）。</summary>
+    private Panel BuildLeftPanel(TabControl tabControl, Color cCard, Color cBody, Color cAux, Color cPrimary, Color cRed)
+    {
         var leftPanel = new Panel
         {
             Dock = DockStyle.Left,
@@ -260,18 +317,20 @@ public class MainForm : Form
 
         // ── Control Panel ──
         var lblCtrlTitle = MakeSectionTitle("Control Panel", cPrimary);
-        var btnStart = MakeBtn("启动 / 唤醒", cCard, cBody);
-        var btnStop = MakeBtn("停止", Color.FromArgb(0x3A, 0x20, 0x20), cRed, enabled: false);
-        var btnClearLog = MakeBtn("清空日志", cCard, cBody);
-        var btnClearCache = MakeBtn("清空缓存", cCard, cBody, h: 30);
-        var lblStatus = new Label { Text = "空闲", Dock = DockStyle.Fill, ForeColor = cAux, Font = new Font("Microsoft YaHei UI", 9F), TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(0, 6, 0, 12) };
+        _btnStart = MakeBtn("启动 / 唤醒", cCard, cBody);
+        _btnStop = MakeBtn("停止", Color.FromArgb(0x3A, 0x20, 0x20), cRed, enabled: false);
+        _btnClearLog = MakeBtn("清空日志", cCard, cBody);
+        _btnClearCache = MakeBtn("清空缓存", cCard, cBody, h: 30);
+        _lblStatus = new Label { Text = "空闲", Dock = DockStyle.Fill, ForeColor = cAux, Font = new Font("Microsoft YaHei UI", 9F), TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(0, 6, 0, 12) };
 
         // ── Configuration ──
         var lblCfgTitle = MakeSectionTitle("Configuration", cPrimary);
         var btnSlotMgmt = MakeBtn("槽位管理", cCard, cBody, h: 30);
         var btnOpenConfig = MakeBtn("⚙ 配置管理", cCard, cBody);
-        var btnExport = MakeBtn("保存配置到…", cCard, cBody, h: 30);
-        var btnImport = MakeBtn("载入配置", cCard, cBody, h: 30);
+        _btnExportCfg = MakeBtn("保存配置到…", cCard, cBody, h: 30);
+        _btnImportCfg = MakeBtn("载入配置", cCard, cBody, h: 30);
+        btnSlotMgmt.Click += (_, _) => tabControl.SelectedTab = _tabSlotMgmt;
+        btnOpenConfig.Click += (_, _) => tabControl.SelectedTab = _tabConfig;
 
         // ── User Manual ──
         var lblManualTitle = MakeSectionTitle("User Manual", cPrimary);
@@ -290,22 +349,17 @@ public class MainForm : Form
         };
         leftFlow.Controls.AddRange(new Control[]
         {
-            lblCtrlTitle, btnStart, btnStop, btnClearLog, btnClearCache, lblStatus,
-            lblCfgTitle, btnSlotMgmt, btnOpenConfig, btnExport, btnImport,
+            lblCtrlTitle, _btnStart, _btnStop, _btnClearLog, _btnClearCache, _lblStatus,
+            lblCfgTitle, btnSlotMgmt, btnOpenConfig, _btnExportCfg, _btnImportCfg,
             lblManualTitle, btnHelp, btnFaq, btnChangelog
         });
         leftPanel.Controls.Add(leftFlow);
+        return leftPanel;
+    }
 
-        // ════════════ 右侧区域 ════════════
-        var rightSplit = new SplitContainer
-        {
-            Dock = DockStyle.Fill,
-            Orientation = Orientation.Horizontal,
-            SplitterWidth = 4,
-            BackColor = cBg,
-        };
-
-        // ── 标题栏 (44px) ──
+    /// <summary>标题栏 (44px)：产品名 + slogan。</summary>
+    private static Panel BuildTitleBar(Color cCard, Color cPrimary, Color cAux)
+    {
         var titleBar = new Panel
         {
             Dock = DockStyle.Top,
@@ -330,9 +384,12 @@ public class MainForm : Form
         };
         titleBar.Controls.Add(lblTitle);
         titleBar.Controls.Add(lblSlogan);
+        return titleBar;
+    }
 
-        // ── TabControl ──
-        var tabHost = new Panel { Dock = DockStyle.Fill, BackColor = cBg };
+    /// <summary>TabControl：6 页（日志 / 统计 / 槽位绑定 / 槽位管理 / 系统资源 / 配置管理）。</summary>
+    private TabControl BuildTabs(Color cBg, Color cCard, Color cBody)
+    {
         var tabControl = new TabControl
         {
             Dock = DockStyle.Fill,
@@ -346,7 +403,7 @@ public class MainForm : Form
         tabLog.Controls.Add(_txtLog);
 
         var tabStats = new TabPage("统计") { BackColor = cBg, Padding = new Padding(10) };
-        tabStats.Controls.Add(BuildStatsPanel(cBg, cCard, cBody, cPrimary));
+        tabStats.Controls.Add(BuildStatsPanel(cBg, cCard, cBody));
 
         // 槽位绑定页：上方绑定表格 + 下方槽位日志（独立持久化 slot.log）
         var tabSlots = new TabPage("槽位绑定") { BackColor = cBg, Padding = new Padding(10) };
@@ -368,14 +425,14 @@ public class MainForm : Form
         tabSlots.Controls.Add(_gridSlots);
 
         // 槽位管理页：DataGridView（强占/KV缓存 CheckBox 可编辑）
-        var tabSlotMgmt = new TabPage("槽位管理") { BackColor = cBg, Padding = new Padding(10) };
+        _tabSlotMgmt = new TabPage("槽位管理") { BackColor = cBg, Padding = new Padding(10) };
         _gridSlotMgmt = MakeGrid(cCard, cBody);
         _gridSlotMgmt.ReadOnly = false;
         _gridSlotMgmt.Columns.AddRange(
             MakeGridCol("亲和 Key"), MakeGridCol("应用"), MakeGridCol("槽位"),
             MakeCheckCol("强占"), MakeCheckCol("KV缓存"), MakeGridCol("最后活跃"));
         _gridSlotMgmt.CellValueChanged += OnSlotMgmtCellChanged;
-        tabSlotMgmt.Controls.Add(_gridSlotMgmt);
+        _tabSlotMgmt.Controls.Add(_gridSlotMgmt);
 
         var tabRes = new TabPage("系统资源") { BackColor = cBg, Padding = new Padding(10) };
         _lblResDetail = new Label
@@ -387,17 +444,16 @@ public class MainForm : Form
         };
         tabRes.Controls.Add(_lblResDetail);
 
-        var tabConfig = new TabPage("配置管理") { BackColor = cBg, Padding = new Padding(10) };
-        tabConfig.Controls.Add(BuildConfigPanel(cCard, cBody));
+        _tabConfig = new TabPage("配置管理") { BackColor = cBg, Padding = new Padding(10) };
+        _tabConfig.Controls.Add(BuildConfigPanel());
 
-        tabControl.TabPages.AddRange(new TabPage[] { tabLog, tabStats, tabSlots, tabSlotMgmt, tabRes, tabConfig });
-        btnOpenConfig.Click += (_, _) => tabControl.SelectedTab = tabConfig;
-        btnSlotMgmt.Click += (_, _) => tabControl.SelectedTab = tabSlotMgmt;
-        tabHost.Controls.Add(tabControl);
-        rightSplit.Panel1.Controls.Add(tabHost);
-        rightSplit.Panel1.Controls.Add(titleBar);
+        tabControl.TabPages.AddRange(new TabPage[] { tabLog, tabStats, tabSlots, _tabSlotMgmt, tabRes, _tabConfig });
+        return tabControl;
+    }
 
-        // ════════════ 底部 SideStatsPanel (200px, Dock=Bottom) ════════════
+    /// <summary>底部 SideStatsPanel (200px)：Token 汇总 / 槽位绑定 / 思考模式 三卡片。</summary>
+    private Panel BuildSidePanel(Color cBottom, Color cCard, Color cTitle, Color cBody, Color cPrimary)
+    {
         var sidePanel = new Panel
         {
             Dock = DockStyle.Fill,
@@ -457,35 +513,7 @@ public class MainForm : Form
         sideGrid.Controls.Add(colSlot, 1, 0);
         sideGrid.Controls.Add(colThink, 2, 0);
         sidePanel.Controls.Add(sideGrid);
-        rightSplit.Panel2.Controls.Add(sidePanel);
-
-        // ════════════ 主布局 ════════════
-        var mainSplit = new SplitContainer
-        {
-            Dock = DockStyle.Fill,
-            Orientation = Orientation.Vertical,
-            SplitterWidth = 4,
-            BackColor = cBg,
-        };
-        mainSplit.Panel1.Controls.Add(leftPanel);
-        mainSplit.Panel2.Controls.Add(rightSplit);
-
-        Controls.Add(mainSplit);
-
-        Shown += (_, _) =>
-        {
-            mainSplit.SplitterDistance = 240;
-            rightSplit.SplitterDistance = Math.Max(rightSplit.Height - 200, 100);
-        };
-
-        // ════════════ 事件接线 ════════════
-        _btnStart = btnStart;
-        _btnStop = btnStop;
-        _btnClearLog = btnClearLog;
-        _btnClearCache = btnClearCache;
-        _lblStatus = lblStatus;
-        _btnExportCfg = btnExport;
-        _btnImportCfg = btnImport;
+        return sidePanel;
     }
 
     /// <summary>创建统一风格按钮。</summary>
@@ -539,7 +567,7 @@ public class MainForm : Form
     };
 
     /// <summary>构建 Configuration 面板（14 项配置 + 浏览按钮）。字体白色，暗色背景。</summary>
-    private Control BuildConfigPanel(Color cardBg, Color bodyColor)
+    private Control BuildConfigPanel()
     {
         var panel = new TableLayoutPanel
         {
@@ -623,7 +651,7 @@ public class MainForm : Form
     }
 
     /// <summary>构建统计面板（汇总行 + 表格 + 清空按钮）。暗色主题，白色文字。</summary>
-    private Control BuildStatsPanel(Color pageBg, Color cardBg, Color bodyColor, Color primary)
+    private Control BuildStatsPanel(Color pageBg, Color cardBg, Color bodyColor)
     {
         var panel = new TableLayoutPanel
         {
@@ -1007,18 +1035,18 @@ public class MainForm : Form
         if (bindings == null)
         {
             _gridSlotMgmt.Rows.Clear();
+            _slotMgmtRowIdx.Clear();
             return;
         }
-        // 行 Key = 亲和 Key，避免整表 Clear 后重复刷新闪烁
+        // 行 Key = 亲和 Key，避免整表 Clear 后重复刷新闪烁；Dictionary 索引消除 O(n²) 线性扫 Tag（审计）
         foreach (var (key, app, slot, lastActive, preemptive, kvCache) in bindings)
         {
-            int idx = -1;
-            for (int i = 0; i < _gridSlotMgmt.Rows.Count; i++)
-                if (_gridSlotMgmt.Rows[i].Tag?.ToString() == key) { idx = i; break; }
-            if (idx < 0)
+            int idx;
+            if (!_slotMgmtRowIdx.TryGetValue(key, out idx))
             {
                 idx = _gridSlotMgmt.Rows.Add();
                 _gridSlotMgmt.Rows[idx].Tag = key;
+                _slotMgmtRowIdx[key] = idx;
             }
             var row = _gridSlotMgmt.Rows[idx];
             row.Cells[0].Value = key;
@@ -1201,19 +1229,8 @@ public class MainForm : Form
         _btnStart.Enabled = !busy;
         _btnStop.Enabled = busy;
 
-        // 唤醒/运行/休眠期间禁用全部参数控件，防止运行中改参
-        var paramControls = new Control[]
-        {
-            _txtExe, _btnBrowseExe, _txtModel, _btnBrowseModel,
-            _numPort, _numCtx, _numNgl, _numParallel, _chkNoKv, _numThreads, _txtExtra,
-            _chkAuto, _numIdleMin, _txtPcoreMask, _chkForceStream, _txtKvCachePath,
-            _chkTokenGuard, _numReservedTokens,
-            _chkContinuation, _numMaxContinuations, _numContTimeout,
-            _chkCrashRecover, _numMaxRestarts,
-            _chkAutoPreDshRule, _chkAutoPreWebui, _chkAutoPreTrae, _chkAutoPreDshAgent,
-            _btnExportCfg, _btnImportCfg, // 运行中禁止导入/导出，避免改参冲突
-        };
-        foreach (var c in paramControls)
+        // 唤醒/运行/休眠期间禁用全部参数控件，防止运行中改参（清单在 BuildUi 一次构建）
+        foreach (var c in _paramControls)
             c.Enabled = !busy;
         // 智能模式下监听器占用端口，改端口需重绑，监听中禁止编辑
         if (_config.AutoMode)

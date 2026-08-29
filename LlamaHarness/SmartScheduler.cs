@@ -552,8 +552,8 @@ public sealed class SmartScheduler : IDisposable
         // ① 读取完整请求体（非流式检测 / 强制流式改写需要）；GET 无请求体
         byte[]? bodyBytes = await ReadRequestBodyAsync(req);
 
-        // 请求体 dump（应用识别分析用）：每个 POST 请求的原始 body + headers 落盘
-        if (bodyBytes != null && bodyBytes.Length > 0)
+        // 请求体 dump（应用识别分析用）：每个 POST 请求的原始 body + headers 落盘；O-18：默认关闭，配置开启才生效（防 prompt 隐私落盘与无谓 IO）
+        if (bodyBytes != null && bodyBytes.Length > 0 && _cfg.RequestDumpEnabled)
             DumpRequest(ctx, bodyBytes);
 
         // ② 网关预处理：思考模式拦截 / 槽位亲和与 KV restore / TokenGuard / 强制流式 / 前缀哈希
@@ -706,13 +706,14 @@ public sealed class SmartScheduler : IDisposable
         {
             bool inToolLoop = DetectToolLoop(body);
             bool didLock = false, didUnlock = false;
+            // O-15：锁内只做 _toolLockedKeys 集合判定；aff 调用（自带内部锁 + 文件 I/O）全部移出，消除锁嵌套
+            bool alreadyPreemptive = aff.IsPreemptive(key);
             lock (_kvStateGate)
             {
                 if (inToolLoop)
                 {
-                    if (!_toolLockedKeys.Contains(key) && !aff.IsPreemptive(key))
+                    if (!_toolLockedKeys.Contains(key) && !alreadyPreemptive)
                     {
-                        aff.SetPreemptive(key, true);
                         _toolLockedKeys.Add(key);
                         didLock = true;
                     }
@@ -724,6 +725,7 @@ public sealed class SmartScheduler : IDisposable
             }
             if (didLock)
             {
+                aff.SetPreemptive(key, true); // 移出锁外（O-15）
                 EmitSlot($"[KV-LOCK] Tool 链会话锁定：{key} → slot{slot}（强占，不驱逐）");
             }
             else if (didUnlock)
@@ -735,8 +737,8 @@ public sealed class SmartScheduler : IDisposable
 
         var kv = _kvCache;
 
-        // KV Cache：驱逐前 save（仅当被驱逐者的 KvCache=true）
-        if (evicted != null && evictedSlot >= 0 && kv != null && evictedKvCache)
+        // KV Cache：驱逐前 save（仅当被驱逐者的 KvCache=true；evicted != null 已蕴含 evictedSlot 有效，SlotAffinity 仅驱逐时置位）
+        if (evicted != null && kv != null && evictedKvCache)
         {
             try
             {
@@ -976,7 +978,7 @@ public sealed class SmartScheduler : IDisposable
             var obj = System.Text.Json.Nodes.JsonNode.Parse(body)?.AsObject();
             var msgs = obj?["messages"] as System.Text.Json.Nodes.JsonArray;
             if (msgs == null || msgs.Count == 0) return false;
-            return msgs[^1]?["role"]?.GetValue<string>() == "tool";
+            return string.Equals(msgs[^1]?["role"]?.GetValue<string>(), "tool", StringComparison.OrdinalIgnoreCase); // 与 InjectThinkingMode 的 role 比较口径一致
         }
         catch
         {
@@ -1330,7 +1332,7 @@ public sealed class SmartScheduler : IDisposable
         catch { /* dump 失败不影响主流程 */ }
     }
 
-    private static readonly object _dumpLock = new();
+    private readonly object _dumpLock = new(); // 实例字段：与其余锁风格统一（单实例调度器，无需 static）
 
     /// <summary>判断是否为真实推理请求（刷新闲置计时）：POST + completions/embeddings 路径。</summary>
     private static bool IsInferenceRequest(HttpListenerRequest req)
@@ -1619,6 +1621,8 @@ public sealed class SmartScheduler : IDisposable
         var aff = _affinity;
         var kv = _kvCache;
         if (aff == null || kv == null) return; // --slots 未启用：无快照能力，直接休眠
+        // O-13：60s CTS——超时后主动取消孤儿 save 任务（原实现 WaitAsync 只停止等待，任务仍在后台运行）
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         var saveAll = Task.Run(async () =>
         {
             foreach (var b in aff.Snapshot()) // (Key, App, Slot, LastActive, Preemptive, KvCache)
@@ -1631,17 +1635,28 @@ public sealed class SmartScheduler : IDisposable
                 try
                 {
                     var sw = System.Diagnostics.Stopwatch.StartNew();
-                    await kv.SaveAsync(b.Slot, b.Key).ConfigureAwait(false);
+                    await kv.SaveAsync(b.Slot, b.Key, cts.Token).ConfigureAwait(false);
                     EmitSlot($"[KV-SAVE] 休眠前快照：{b.Key} → slot{b.Slot}（{sw.Elapsed.TotalSeconds:F1}s）");
+                }
+                catch (OperationCanceledException) when (cts.IsCancellationRequested)
+                {
+                    return; // O-13：超时取消，放弃剩余槽位
                 }
                 catch (Exception ex)
                 {
                     EmitSlot($"休眠前 KV 保存失败：{b.Key}（{ex.Message}），该槽位 KV 将丢失，唤醒后全量 prefill。");
                 }
             }
-        });
-        try { await saveAll.WaitAsync(TimeSpan.FromSeconds(60)).ConfigureAwait(false); }
-        catch (TimeoutException) { Log?.Invoke("休眠前 KV 保存超时（60s），放弃剩余快照，继续休眠。"); }
+        }, cts.Token);
+        try
+        {
+            await saveAll.WaitAsync(TimeSpan.FromSeconds(60)).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            Log?.Invoke("休眠前 KV 保存超时（60s），放弃剩余快照，继续休眠。");
+            cts.Cancel(); // CTS(60s) 自动取消与 WaitAsync 计时存在竞态：此处确保孤儿任务被取消
+        }
     }
 
     /// <summary>进程退出回调：休眠/运行态退出 → 回到监听待机；唤醒态由唤醒任务自行处理。</summary>
