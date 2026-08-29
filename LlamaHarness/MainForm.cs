@@ -89,6 +89,7 @@ public class MainForm : Form
         ReadOnly = true,
         ScrollBars = RichTextBoxScrollBars.Vertical,
         WordWrap = false,
+        BorderStyle = BorderStyle.None, // 无边框，消除白边
         BackColor = C_TextBg,
         ForeColor = C_TextFg,
         Font = new Font("Consolas", 9F),
@@ -121,6 +122,7 @@ public class MainForm : Form
         ReadOnly = true,
         AllowUserToAddRows = false,
         AllowUserToResizeRows = false,
+        BorderStyle = BorderStyle.None, // 无边框，消除白边
         AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
         BackgroundColor = C_TextBg,
         ForeColor = C_TextFg,
@@ -360,6 +362,7 @@ public class MainForm : Form
             TabStop = false,
             Cursor = Cursors.Default,
         };
+        lblAppName.FlatAppearance.BorderSize = 0; // 无边框，消除白边
 
         // ── Control Panel ──
         var lblCtrlTitle = MakeSectionTitle("Control Panel");
@@ -409,7 +412,8 @@ public class MainForm : Form
         return leftPanel;
     }
 
-    /// <summary>从 static/icon 加载图标（缓存；文件缺失返回 null → 按钮降级纯文本）。</summary>
+    /// <summary>从 static/icon 加载图标并缩放到 16x16（缓存；文件缺失返回 null → 按钮降级纯文本）。
+    /// 参考图标原始尺寸 300px+，必须缩放，否则挤占按钮文字区域。</summary>
     private static Image? LoadIcon(string fileName)
     {
         if (IconCache.TryGetValue(fileName, out var cached)) return cached;
@@ -418,7 +422,10 @@ public class MainForm : Form
         {
             if (File.Exists(path))
             {
-                var img = new Bitmap(path); // 构造时同步读入内存，不持有文件句柄
+                using var src = new Bitmap(path); // 构造时同步读入内存，不持有文件句柄
+                var img = new Bitmap(16, 16);     // 缩放到 16x16（侧边栏按钮图标标准尺寸）
+                using (var g = Graphics.FromImage(img))
+                    g.DrawImage(src, 0, 0, 16, 16);
                 IconCache[fileName] = img;
                 return img;
             }
@@ -518,6 +525,7 @@ public class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ReadOnly = true,
+            BorderStyle = BorderStyle.None, // 无边框，消除白边
             BackColor = C_TextBg,
             ForeColor = C_TextFg,
             Font = new Font("Consolas", 9F),
@@ -588,17 +596,22 @@ public class MainForm : Form
         return container;
     }
 
-    /// <summary>扁平页签按钮（#3d3d3d 底白字，尺寸自适应文字）。</summary>
-    private static Button MakeTabBtn(string text) => new()
+    /// <summary>扁平页签按钮（#3d3d3d 底白字，尺寸自适应文字，无边框）。</summary>
+    private static Button MakeTabBtn(string text)
     {
-        Text = text,
-        AutoSize = true,
-        Padding = new Padding(12, 4, 12, 4),
-        FlatStyle = FlatStyle.Flat,
-        BackColor = C_Btn,
-        ForeColor = Color.White,
-        Font = new Font("Microsoft YaHei UI", 9F),
-    };
+        var b = new Button
+        {
+            Text = text,
+            AutoSize = true,
+            Padding = new Padding(12, 4, 12, 4),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = C_Btn,
+            ForeColor = Color.White,
+            Font = new Font("Microsoft YaHei UI", 9F),
+        };
+        b.FlatAppearance.BorderSize = 0; // 无边框，消除白边
+        return b;
+    }
 
     /// <summary>切换页签：内容页显隐 + 选中样式刷新（选中 = #FFA500 底黑字）。</summary>
     private void SelectTab(int index)
@@ -736,6 +749,7 @@ public class MainForm : Form
             Enabled = enabled,
             Font = new Font("Microsoft YaHei UI", 9F),
         };
+        b.FlatAppearance.BorderSize = 0; // 无边框，消除白边
         var img = LoadIcon(iconFile ?? "");
         if (img != null)
         {
@@ -748,12 +762,13 @@ public class MainForm : Form
         return b;
     }
 
-    /// <summary>创建统一风格 DataGridView（#1e1e1e 底 / #2d2d2d 网格线）。</summary>
+    /// <summary>创建统一风格 DataGridView（#1e1e1e 底 / #2d2d2d 网格线，无边框）。</summary>
     private static DataGridView MakeGrid() => new()
     {
         Dock = DockStyle.Fill,
         ReadOnly = true,
         AllowUserToAddRows = false,
+        BorderStyle = BorderStyle.None, // 无边框，消除白边
         BackgroundColor = C_TextBg,
         ForeColor = C_TextFg,
         GridColor = C_Card,
@@ -789,6 +804,10 @@ public class MainForm : Form
     /// <summary>构建 Configuration 面板（14 项配置 + 浏览按钮）。字体白色，暗色背景。</summary>
     private Control BuildConfigPanel()
     {
+        // 浏览按钮边框清零（对象初始化器内无法引用实例成员，在此统一设置）
+        _btnBrowseExe.FlatAppearance.BorderSize = 0;
+        _btnBrowseModel.FlatAppearance.BorderSize = 0;
+
         var panel = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
