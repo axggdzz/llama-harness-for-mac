@@ -66,7 +66,6 @@ public class MainForm : Form
     private Button _btnTurbo;     // 开启极速模式 → Off（不注入思考参数）
     private Button _btnExportCfg;
     private Button _btnImportCfg;
-    private Label _lblStatus;
 
     // —— 思考模式状态标签（侧边统计面板）——
     private readonly Label _lblThinking = new()
@@ -147,7 +146,7 @@ public class MainForm : Form
     private int _currentTab = 0;
 
     // —— 右侧状态面板（原底部 SideStatsPanel 移入）——
-    private Label _lblPhase;        // 服务阶段（空闲/唤醒中/运行/休眠）
+    private Label _lblStatus;       // 服务阶段卡片：调度器状态文本（运行中 · N个在途任务…），替代原侧边栏实例
     private Label _lblModuleState;  // 模块状态（网关 运行中绿 / 已停止红）
     private Label _lblResSummary;   // 系统资源单行摘要（CPU/内存/显存）
     private Label _lblRunTime;      // 运行时长（自本次唤醒起）
@@ -375,7 +374,7 @@ public class MainForm : Form
         _btnClearCache = MakeBtn("清空缓存", "其他设置.png", h: 30);
         _btnThinkOn = MakeBtn("开启思考模式", "附加选项.png", h: 30);
         _btnTurbo = MakeBtn("开启极速模式", "速度设置.png", h: 30);
-        _lblStatus = new Label { Text = "空闲", Dock = DockStyle.Fill, ForeColor = C_Aux, Font = new Font("Microsoft YaHei UI", 9F), TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(0, 6, 0, 12) };
+        // _lblStatus 已移至右侧"服务阶段"卡片（替换原 _lblPhase），此处不再创建侧边栏实例
 
         // ── Configuration ──
         var lblCfgTitle = MakeSectionTitle("Configuration");
@@ -406,7 +405,7 @@ public class MainForm : Form
         };
         leftFlow.Controls.AddRange(new Control[]
         {
-            lblCtrlTitle, _btnStart, _btnStop, _btnClearLog, _btnClearCache, _btnThinkOn, _btnTurbo, _lblStatus,
+            lblCtrlTitle, _btnStart, _btnStop, _btnClearLog, _btnClearCache, _btnThinkOn, _btnTurbo,
             lblCfgTitle, btnSlotMgmt, btnOpenConfig, _btnExportCfg, _btnImportCfg,
             lblManualTitle, btnHelp, btnFaq, btnChangelog
         });
@@ -677,10 +676,11 @@ public class MainForm : Form
             return card;
         }
 
-        _lblPhase = new Label
+        // 服务阶段卡片：显示调度器状态文本（"运行中 · N个在途任务…"），替代原侧边栏 _lblStatus
+        _lblStatus = new Label
         {
             Text = "空闲",
-            Font = new Font("Microsoft YaHei UI", 11F),
+            Font = new Font("Microsoft YaHei UI", 9F),
             ForeColor = C_Aux,
         };
         _lblModuleState = new Label
@@ -721,7 +721,7 @@ public class MainForm : Form
 
         var cards = new[]
         {
-            MakeCard("服务阶段", _lblPhase),
+            MakeCard("服务阶段", _lblStatus), // 调度器状态文本（运行中 · N个在途任务…）
             MakeCard("模块状态", _lblModuleState),
             MakeCard("系统资源", _lblResSummary),
             MakeCard("运行时长", _lblRunTime),
@@ -1505,14 +1505,7 @@ public class MainForm : Form
         // 思考模式是运行态状态机：仅 Running 可切换（唤醒会按启动参数重置基线，待机/过渡态点击无意义）
         _btnThinkOn.Enabled = _btnTurbo.Enabled = phase == SmartScheduler.Phase.Running;
 
-        // 服务阶段 + 模块状态（右侧状态面板）：运行=绿 / 唤醒·休眠=橙过渡 / 待机=红停止
-        _lblPhase.Text = phase switch
-        {
-            SmartScheduler.Phase.Running => "运行",
-            SmartScheduler.Phase.Waking => "唤醒中",
-            SmartScheduler.Phase.Sleeping => "休眠",
-            _ => "空闲",
-        };
+        // 模块状态（右侧状态面板）：运行=绿 / 唤醒·休眠=橙过渡 / 待机=红停止
         bool running = phase == SmartScheduler.Phase.Running;
         _lblModuleState.Text = running ? "网关 运行中" : (phase == SmartScheduler.Phase.Standby ? "网关 已停止" : "网关 过渡中");
         _lblModuleState.BackColor = running ? C_Green : (phase == SmartScheduler.Phase.Standby ? C_Red : C_Warn);
@@ -1524,7 +1517,14 @@ public class MainForm : Form
         if (_config.AutoMode)
             _numPort.Enabled = false;
 
-        // 颜色语义与实际状态机对齐：Standby=待机（灰）/ Waking=唤醒中（橙黄）/ Running=运行（绿）/ Sleeping=休眠释放过渡（橙，短暂态，文本提示"正在释放显存"）
+        // 服务阶段卡片（_lblStatus）：相位切换时设基础文本 + 颜色；调度器状态事件会覆盖为详细文本（"运行中 · N个在途任务…"）
+        _lblStatus.Text = phase switch
+        {
+            SmartScheduler.Phase.Running => "运行",
+            SmartScheduler.Phase.Waking => "唤醒中",
+            SmartScheduler.Phase.Sleeping => "休眠",
+            _ => "空闲",
+        };
         _lblStatus.ForeColor = phase switch
         {
             SmartScheduler.Phase.Running => Color.Green,
