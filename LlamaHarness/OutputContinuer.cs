@@ -87,7 +87,7 @@ public static class OutputContinuer
             originalBody = nextBody;
 
             // TokenGuard 防护（续接输入可能超预算）
-            int budget = Math.Max(1024, cfg.CtxSize / Math.Max(1, cfg.Parallel) - cfg.ReservedOutputTokens);
+            int budget = cfg.GetInputBudget();
             var (ok, guarded, note) = await TokenGuard.GuardAsync(hc, backendPort, originalBody, budget);
             if (!ok) { log?.Invoke($"续接中止：{note}"); return (false, state.Accumulated.ToString()); }
             if (guarded != null && guarded != originalBody) originalBody = guarded;
@@ -295,7 +295,7 @@ public static class OutputContinuer
             if (nextBody == null) break;
             originalBody = nextBody;
 
-            int budget = Math.Max(1024, cfg.CtxSize / Math.Max(1, cfg.Parallel) - cfg.ReservedOutputTokens);
+            int budget = cfg.GetInputBudget();
             var (ok, guarded, note) = await TokenGuard.GuardAsync(hc, backendPort, originalBody, budget);
             if (!ok) { log?.Invoke($"续接中止：{note}"); break; }
             if (guarded != null && guarded != originalBody) originalBody = guarded;

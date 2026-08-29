@@ -88,6 +88,12 @@ public class AppConfig
         }
     }
 
+    /// <summary>单槽输入 token 预算：上下文均摊到每槽，扣除预留输出预算（审计 O-9：收敛此前散落 5 处的重复公式）。</summary>
+    public int GetInputBudget() => Math.Max(MinInputBudgetTokens, CtxSize / Math.Max(1, Parallel) - ReservedOutputTokens);
+
+    /// <summary>输入预算下限（防止极端配置下预算 ≤0 导致全部请求被裁剪）。</summary>
+    public const int MinInputBudgetTokens = 1024;
+
     /// <summary>保存配置到程序目录（临时文件 + 重命名原子写入，防半截文件损坏），返回是否成功。</summary>
     public bool Save(out string? error)
     {
