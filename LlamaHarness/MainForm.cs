@@ -21,7 +21,6 @@ public class MainForm : Form
     private static readonly Color C_Green = Color.FromArgb(0x27, 0xAE, 0x60);     // #27AE60 运行中
     private static readonly Color C_Red = Color.FromArgb(0xE7, 0x4C, 0x3C);       // #E74C3C 已停止/异常
     private static readonly Color C_Warn = Color.FromArgb(0xFF, 0x98, 0x00);      // #FF9800 过渡态（唤醒/休眠）
-    private static readonly Color C_Dim = Color.FromArgb(0x66, 0x66, 0x66);       // #666666 禁用按钮字体（浅灰，非黑）
 
     private readonly AppConfig _config;
     private readonly SmartScheduler _scheduler;
@@ -359,12 +358,14 @@ public class MainForm : Form
             Dock = DockStyle.Top,
             ForeColor = Color.White,
             Font = new Font("Microsoft YaHei UI", 11F, FontStyle.Bold),
-            BackColor = C_Card, // #2d2d2d（与侧栏同色，对齐参考 DushBroad 标题区）
+            BackColor = C_BtnHover, // #4a4a4a（默认色，原悬停色）
             FlatStyle = FlatStyle.Flat,
             TabStop = false,
             Cursor = Cursors.Default,
         };
         lblAppName.FlatAppearance.BorderSize = 0; // 无边框，消除白边
+        lblAppName.MouseEnter += (_, _) => lblAppName.BackColor = C_Card; // 悬停 → #2d2d2d（原默认色）
+        lblAppName.MouseLeave += (_, _) => lblAppName.BackColor = C_BtnHover; // 还原 → #4a4a4a
 
         // ── Control Panel ──
         var lblCtrlTitle = MakeSectionTitle("Control Panel");
@@ -774,7 +775,7 @@ public class MainForm : Form
             Size = new Size(168, h),
             FlatStyle = FlatStyle.Flat,
             BackColor = C_Btn,
-            ForeColor = enabled ? Color.White : C_Dim, // 禁用态初始即浅灰（非黑）
+            ForeColor = Color.White, // 统一白字（禁用态也保持白色，清晰）
             Enabled = enabled,
             Font = new Font("Microsoft YaHei UI", 9F),
             TextAlign = ContentAlignment.MiddleCenter,
@@ -817,15 +818,16 @@ public class MainForm : Form
         AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
     };
 
-    /// <summary>左侧分组标题（small bold，透明底白字——对齐参考侧边栏 Control Panel / Configuration / User Manual 分组，无独立底色块）。</summary>
+    /// <summary>左侧分组标题（small bold，黑底容器包裹——Control Panel / Configuration / User Manual 三个标签共用黑色容器底色）。</summary>
     private static Label MakeSectionTitle(string text) => new()
     {
         Text = $"  {text}",
         Dock = DockStyle.Fill,
         ForeColor = C_Title,
-        BackColor = Color.Transparent, // 透明底（与侧栏 #2d2d2d 融合，层次感靠按钮灰度差异）
+        BackColor = Color.Black, // 黑底容器（层次感）
         Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold),
         TextAlign = ContentAlignment.MiddleLeft,
+        Padding = new Padding(0, 4, 0, 4), // 上下内边距，形成容器包裹感
         Margin = new Padding(0, 12, 0, 8),
     };
 
@@ -1558,9 +1560,9 @@ public class MainForm : Form
             _ => Color.Gray, // Standby 待机
         };
 
-        // 禁用按钮字体统一浅灰（#666666），非黑——层次感更好
+        // 禁用按钮字体统一白色（用户要求：禁用态也保持白字，清晰）
         foreach (var b in new[] { _btnStart, _btnStop, _btnClearLog, _btnClearCache, _btnThinkOn, _btnTurbo, _btnExportCfg, _btnImportCfg })
-            if (b != null) b.ForeColor = b.Enabled ? Color.White : C_Dim;
+            if (b != null) b.ForeColor = Color.White;
 
         // CheckBox 禁用时同步刷新为灰（启用时恢复黑）
         var checkColor = busy ? Color.FromArgb(0x88, 0x88, 0x88) : Color.Black;
