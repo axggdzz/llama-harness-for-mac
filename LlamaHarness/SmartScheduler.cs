@@ -1405,8 +1405,10 @@ public sealed class SmartScheduler : IDisposable
     {
         effortFix = null;
         // 快速路径：Off 态且无指令文本且无需要清洗的字段 → 无需解析
+        // DSH 客户端发送的思考字段：顶层 "thinking" / "reasoning_effort" + chat_template_kwargs 内字段
         if (level == ThinkingLevel.Off && !ContainsAnyInstruction(json)
-            && !json.Contains("reasoning_effort") && !json.Contains("enable_thinking"))
+            && !json.Contains("reasoning_effort") && !json.Contains("enable_thinking")
+            && !json.Contains("\"thinking\""))
             return null;
         try
         {
@@ -1454,8 +1456,13 @@ public sealed class SmartScheduler : IDisposable
                 }
             }
 
-            // 2. 统一清洗：移除客户端自带的 reasoning_effort / enable_thinking（网关层统一管控）
+            // 2. 统一清洗：移除客户端自带的思考相关字段（网关层统一管控）
+            // DSH 客户端发送的思考字段：顶层 "thinking" / "reasoning_effort" + chat_template_kwargs 内字段
             bool cleaned = false;
+            // 顶层字段（DSH 格式）
+            if (obj.Remove("thinking")) cleaned = true;
+            if (obj.Remove("reasoning_effort")) cleaned = true;
+            // chat_template_kwargs 内字段（部分客户端格式）
             if (obj["chat_template_kwargs"] is System.Text.Json.Nodes.JsonObject ctkExisting)
             {
                 if (ctkExisting.Remove("reasoning_effort")) cleaned = true;
@@ -1484,7 +1491,7 @@ public sealed class SmartScheduler : IDisposable
 
             // 清洗说明（用于日志）
             if (cleaned)
-                effortFix = "已清洗客户端思考参数（reasoning_effort/enable_thinking），按网关状态机重新注入";
+                effortFix = "已清洗客户端思考参数（thinking/reasoning_effort/enable_thinking），按网关状态机重新注入";
 
             return hit || cleaned || level != ThinkingLevel.Off ? obj.ToJsonString() : null;
         }
