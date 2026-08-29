@@ -1399,7 +1399,9 @@ public sealed class SmartScheduler : IDisposable
     ///    命中 → 设置全局档位，剥离指令文本（避免模型把指令当问题回答）。
     /// 2. 统一清洗：移除请求体中客户端自带的 chat_template_kwargs.reasoning_effort / enable_thinking
     ///    （网关代理层统一管控思考参数，不信任客户端自行携带的值）。
-    /// 3. 按状态机注入：Off → 不注入；Low/Medium/XHigh → 注入对应 reasoning_effort + enable_thinking=true。
+    /// 3. 按状态机注入：Off → 显式 enable_thinking=false（Qwen3 混合思考模型默认会思考，
+    ///    不显式关闭则仍输出 reasoning_content，导致下游 pi-ai 严格 JSON.parse 报 PI_AI_ERROR）；
+    ///    Low/Medium/XHigh → 注入对应 reasoning_effort + enable_thinking=true。
     /// DOM 解析失败时透传原始请求（返回 null）。
     /// </summary>
     /// <param name="json">请求体 JSON</param>
@@ -1409,18 +1411,14 @@ public sealed class SmartScheduler : IDisposable
     public static string? InjectThinkingMode(string json, ref ThinkingLevel level, out string? effortFix)
     {
         effortFix = null;
-        // 快速路径：Off 态且无指令文本且无需要清洗的字段 → 无需解析
-        // DSH 客户端发送的思考字段：顶层 "thinking" / "reasoning_effort" + chat_template_kwargs 内字段
-        if (level == ThinkingLevel.Off && !ContainsAnyInstruction(json)
-            && !json.Contains("reasoning_effort") && !json.Contains("enable_thinking")
-            && !json.Contains("\"thinking\""))
-            return null;
+        // 注意：不再有无改动的快速路径——Off 态也必须显式注入 enable_thinking=false，
+        // 否则 Qwen3 混合思考模型默认仍会输出 reasoning_content（实测 REASONING_LEN≈5800），
+        // 思考文本混入 tool-call JSON 后导致 pi-ai 严格 JSON.parse 报 PI_AI_ERROR。
         try
         {
             var node = System.Text.Json.Nodes.JsonNode.Parse(json);
             if (node is not System.Text.Json.Nodes.JsonObject obj) return null;
 
-            bool hit = false;
             if (obj["messages"] is System.Text.Json.Nodes.JsonArray msgs && msgs.Count > 0)
             {
                 for (int i = msgs.Count - 1; i >= 0; i--)
@@ -1456,7 +1454,6 @@ public sealed class SmartScheduler : IDisposable
                     msgObj["content"] = string.IsNullOrWhiteSpace(stripped.Trim())
                         ? "（思考/推理模式已切换，请简短确认）"
                         : stripped.Trim();
-                    hit = true;
                     break;
                 }
             }
@@ -1476,21 +1473,24 @@ public sealed class SmartScheduler : IDisposable
                 if (ctkExisting.Count == 0) obj.Remove("chat_template_kwargs");
             }
 
-            // 3. 按状态机注入：Off → 不注入；Low/Medium/XHigh → 注入对应 reasoning_effort + enable_thinking=true
-            var effort = EffortOf(level);
-            if (effort != null)
+            // 3. 按状态机注入：Off → 显式 enable_thinking=false；Low/Medium/XHigh → reasoning_effort + enable_thinking=true
+            System.Text.Json.Nodes.JsonObject ctk;
+            if (obj["chat_template_kwargs"] is System.Text.Json.Nodes.JsonObject existing)
             {
-                System.Text.Json.Nodes.JsonObject ctk;
-                if (obj["chat_template_kwargs"] is System.Text.Json.Nodes.JsonObject existing)
-                {
-                    ctk = existing;
-                }
-                else
-                {
-                    ctk = new System.Text.Json.Nodes.JsonObject();
-                    obj["chat_template_kwargs"] = ctk;
-                }
-                ctk["reasoning_effort"] = effort;
+                ctk = existing;
+            }
+            else
+            {
+                ctk = new System.Text.Json.Nodes.JsonObject();
+                obj["chat_template_kwargs"] = ctk;
+            }
+            if (level == ThinkingLevel.Off)
+            {
+                ctk["enable_thinking"] = false; // 关键：混合思考模型必须显式关闭，否则默认仍思考
+            }
+            else
+            {
+                ctk["reasoning_effort"] = EffortOf(level);
                 ctk["enable_thinking"] = true;
             }
 
@@ -1498,7 +1498,8 @@ public sealed class SmartScheduler : IDisposable
             if (cleaned)
                 effortFix = "已清洗客户端思考参数（thinking/reasoning_effort/enable_thinking），按网关状态机重新注入";
 
-            return hit || cleaned || level != ThinkingLevel.Off ? obj.ToJsonString() : null;
+            // 每次解析成功都会改写（至少注入 enable_thinking），故始终返回改写后的 JSON
+            return obj.ToJsonString();
         }
         catch
         {
@@ -1506,12 +1507,6 @@ public sealed class SmartScheduler : IDisposable
             return null;
         }
     }
-
-    /// <summary>是否含任一思考/推理指令文本（快速路径判断用）。</summary>
-    private static bool ContainsAnyInstruction(string json) =>
-        json.Contains("开启思考模式") || json.Contains("关闭思考模式")
-        || json.Contains("开启轻度推理模式") || json.Contains("开启中度推理模式")
-        || json.Contains("开启深度推理模式");
 
     /// <summary>注入 n_slots 固定槽位路由（llama.cpp 多槽特性）。失败返回 null，调用方透传。</summary>
     public static string? InjectNSlots(string json, int slot)
