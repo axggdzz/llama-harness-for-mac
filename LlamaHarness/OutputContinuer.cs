@@ -135,7 +135,11 @@ public static class OutputContinuer
                 while (!ct.IsCancellationRequested)
                 {
                     await Task.Delay(2000, ct);
-                    var bytes = Encoding.UTF8.GetBytes(": 续接中…\n");
+                    // P1：心跳必须发「合法 SSE data 事件」（空 delta chunk）。
+                    // 不能用 ":" 开头的注释行——DSH(deepseek-harness) 等严格 JSON 客户端无法解析注释行，
+                    // 会报 "Unexpected non-whitespace character after JSON"。空 delta chunk 符合 OpenAI SSE 规范，
+                    // 客户端解析后不产生内容，既保活又不污染输出。
+                    var bytes = Encoding.UTF8.GetBytes("data: {\"id\":\"hb\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{}}]}\n\n");
                     if (writeGate != null) await writeGate.WaitAsync();
                     try
                     {
@@ -288,7 +292,20 @@ public static class OutputContinuer
                 }
                 finalPayload = finalObj.ToJsonString();
             }
-            await ForwardAsync("data: " + finalPayload);
+            // 末块事件必须显式以空行（\n\n）结束（SSE 规范）。
+            // 续接分支下本轮的空行/[DONE] 被抑制不写，若末块只带单个 \n，下一轮首个 data 会与末块
+            // 拼成同一事件 → 客户端把两段 JSON 连读，报 "Unexpected non-whitespace character after JSON"。
+            var finalBytes = Encoding.UTF8.GetBytes("data: " + finalPayload + "\n\n");
+            if (writeGate != null) await writeGate.WaitAsync();
+            try
+            {
+                await outResp.OutputStream.WriteAsync(finalBytes);
+                await outResp.OutputStream.FlushAsync();
+            }
+            finally
+            {
+                if (writeGate != null) writeGate.Release();
+            }
             // P0：暂扣行（含 [DONE]）只在真正末轮写出——续接分支若泄漏 [DONE]，客户端会判定流结束而断开连接，
             // 后续轮输出永远不可见，续接链路被毁。续接时丢弃本轮 [DONE]，留给真正末轮。
             if (!doContinue)
