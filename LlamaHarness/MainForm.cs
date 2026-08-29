@@ -752,13 +752,14 @@ public class MainForm : Form
             ForeColor = Color.White,
             Enabled = enabled,
             Font = new Font("Microsoft YaHei UI", 9F),
+            TextAlign = ContentAlignment.MiddleCenter, // 文字居中
         };
         b.FlatAppearance.BorderSize = 0; // 无边框，消除白边
         var img = LoadIcon(iconFile ?? "");
         if (img != null)
         {
             b.Image = img;
-            b.ImageAlign = ContentAlignment.MiddleLeft;
+            b.ImageAlign = ContentAlignment.MiddleLeft; // 图标左对齐（与文字并排时整体居中）
             b.TextImageRelation = TextImageRelation.ImageBeforeText;
         }
         b.MouseEnter += (_, _) => { if (b.Enabled) b.BackColor = C_BtnHover; };
