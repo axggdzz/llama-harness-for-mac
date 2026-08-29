@@ -85,6 +85,11 @@ public sealed class SmartScheduler : IDisposable
     private readonly HashSet<string> _toolLockedKeys = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>前缀哈希表（§8 可观测）：key → SHA256(最新一轮之前的全部 messages JSON)。比对判定原生 KV 前缀复用 HIT/MISS。</summary>
     private readonly Dictionary<string, string> _prefixHashes = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>本进程运行以来已服务过的亲和 key（唤醒时清空）：「进程重启后该 key 首次使用 → restore KV 自愈」判定依据，
+    /// 防止进程存活期间误用磁盘旧快照回退内存中更新的槽位状态。</summary>
+    private readonly HashSet<string> _servedKeysThisRun = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>休眠静默观察期进行中标志（_sleepGate 保护）：防闲置定时器重复触发休眠流程。</summary>
+    private bool _sleepPreparing;
 
     /// <summary>从启动附加参数判定初始思考档位：
     /// enable_thinking:true → XHigh；enable_thinking:false → Off；无该参数 → 默认开启（XHigh）。
@@ -430,12 +435,15 @@ public sealed class SmartScheduler : IDisposable
             else
                 Log?.Invoke("槽位亲和未启用（--parallel=1，单槽无需路由）。");
 
-            // KV Cache 持久化：--parallel > 1 且 KvCachePath 非空时启用（驱逐 save / 重绑定 restore）
+            // KV Cache 持久化：--parallel > 1 且 KvCachePath 非空时启用（驱逐 save / 重绑定 restore / 休眠前 save / 唤醒后 restore）
             _kvCache = (_affinity != null && !string.IsNullOrWhiteSpace(_cfg.KvCachePath))
                 ? new KvCacheManager(_hc, _cfg.KvCachePath, _cfg.Parallel, srvPort)
                 : null;
             if (_kvCache != null)
-                Log?.Invoke($"KV Cache 持久化已启用：路径 {_cfg.KvCachePath}（驱逐自动 save，重绑定自动 restore）。");
+                Log?.Invoke($"KV Cache 持久化已启用：路径 {_cfg.KvCachePath}（驱逐自动 save，重绑定自动 restore，休眠前自动 save，唤醒后自动 restore）。");
+
+            // 新进程槽位 KV 全空：清空「本轮已服务」标记 → 唤醒后各 key 首次请求触发 restore 自愈（跳过全量 prefill）
+            lock (_kvStateGate) _servedKeysThisRun.Clear();
 
             await WaitReadyAsync(srvPort);
 
@@ -644,30 +652,36 @@ public sealed class SmartScheduler : IDisposable
                         SlotLog?.Invoke($"驱逐 {evicted}（KV Cache 已关闭，不保存）");
                     }
 
-                    // KV Cache：重绑定时 restore（key 有缓存文件且为新绑定 → 从磁盘恢复槽位 KV）
-                    if (key != null && isNew && kv != null && kv.HasCache(key))
+                    // KV Cache：restore（两种触发：① isNew 重绑定；② 进程重启后该 key 首次使用——休眠唤醒 KV 自愈。
+                    // 无论是否命中 restore，都把 key 记入 _servedKeysThisRun：本进程服务过即不再 restore，防误用磁盘旧快照回退内存新状态）
+                    if (key != null)
                     {
-                        try
+                        bool firstUseThisRun;
+                        lock (_kvStateGate) firstUseThisRun = _servedKeysThisRun.Add(key);
+                        if (kv != null && kv.HasCache(key) && (isNew || firstUseThisRun))
                         {
-                            var sw = System.Diagnostics.Stopwatch.StartNew();
-                            bool ok = await kv.RestoreAsync(slot, key);
-                            if (ok)
+                            try
                             {
-                                Log?.Invoke($"[KV-RESTORE] KV Cache 恢复：{key} → slot{slot}（{sw.Elapsed.TotalSeconds:F1}s，跳过全量 prefill）");
-                                SlotLog?.Invoke($"[KV-RESTORE] KV Cache 恢复：{key} → slot{slot}（{sw.Elapsed.TotalSeconds:F1}s）");
-                                // §8：restore 后重建前缀哈希基线（旧哈希对应驱逐前状态，避免下次请求误报 MISS）
-                                lock (_kvStateGate) _prefixHashes.Remove(key);
+                                var sw = System.Diagnostics.Stopwatch.StartNew();
+                                bool ok = await kv.RestoreAsync(slot, key);
+                                if (ok)
+                                {
+                                    Log?.Invoke($"[KV-RESTORE] KV Cache 恢复：{key} → slot{slot}（{sw.Elapsed.TotalSeconds:F1}s，跳过全量 prefill）");
+                                    SlotLog?.Invoke($"[KV-RESTORE] KV Cache 恢复：{key} → slot{slot}（{sw.Elapsed.TotalSeconds:F1}s）");
+                                    // §8：restore 后重建前缀哈希基线（旧哈希对应驱逐前状态，避免下次请求误报 MISS）
+                                    lock (_kvStateGate) _prefixHashes.Remove(key);
+                                }
+                                else
+                                {
+                                    Log?.Invoke($"KV Cache 恢复失败：{key}（槽位可能忙），降级为全量 prefill。");
+                                    SlotLog?.Invoke($"KV Cache 恢复失败：{key}（槽位忙）");
+                                }
                             }
-                            else
+                            catch (Exception ex)
                             {
-                                Log?.Invoke($"KV Cache 恢复失败：{key}（槽位可能忙），降级为全量 prefill。");
-                                SlotLog?.Invoke($"KV Cache 恢复失败：{key}（槽位忙）");
+                                Log?.Invoke($"KV Cache 恢复异常：{key}（{ex.Message}），降级为全量 prefill。");
+                                SlotLog?.Invoke($"KV Cache 恢复异常：{key}（{ex.Message}）");
                             }
-                        }
-                        catch (Exception ex)
-                        {
-                            Log?.Invoke($"KV Cache 恢复异常：{key}（{ex.Message}），降级为全量 prefill。");
-                            SlotLog?.Invoke($"KV Cache 恢复异常：{key}（{ex.Message}）");
                         }
                     }
 
@@ -1496,18 +1510,88 @@ public sealed class SmartScheduler : IDisposable
             Log?.Invoke("检测到 CPU 亲和性被重置，已重新绑定 P 核。");
     }
 
-    /// <summary>安全停机：仅当无在途任务时执行；Kill 整个进程树，杜绝残留。</summary>
+    /// <summary>
+    /// 安全停机入口：闲置超时且无在途任务时触发。启动后台休眠流程（防重复）：
+    /// 10 秒静默观察期（新请求/在途任务即取消）→ 逐槽 save KV 快照 → Kill 整个进程树，杜绝残留。
+    /// </summary>
     private void SleepNow()
     {
         lock (_sleepGate)
         {
-            if (CurrentPhase != Phase.Running) return;
-            SetPhase(Phase.Sleeping);
+            if (CurrentPhase != Phase.Running || _sleepPreparing) return;
+            _sleepPreparing = true;
         }
-        Interlocked.Increment(ref _sleepCount); // C-102：休眠计数
-        Log?.Invoke($"{IdleMinutes} 分钟无请求，自动休眠（累计 #{Volatile.Read(ref _sleepCount)}，inflight 峰值 {Volatile.Read(ref _inflightPeak)}），正在释放显存…");
-        RaiseStatus("闲置超时，正在释放显存…");
-        _server.Stop(); // Exited 事件将把状态拉回 Standby
+        _ = SleepNowCoreAsync();
+    }
+
+    private async Task SleepNowCoreAsync()
+    {
+        try
+        {
+            var touchAtEntry = _lastTouch;
+            RaiseStatus("闲置超时，10 秒后休眠（期间保存 KV 缓存）…");
+            // 静默观察期：期间任何新请求（Touch 刷新 _lastTouch）或在途任务都取消本次休眠
+            for (int i = 0; i < 10; i++)
+            {
+                await Task.Delay(1000).ConfigureAwait(false);
+                if (Volatile.Read(ref _inflight) > 0 || _lastTouch != touchAtEntry)
+                {
+                    Log?.Invoke("休眠取消：观察期内有新请求或在途任务。");
+                    RaiseStatus("运行中 · 休眠取消（有新活动）");
+                    return;
+                }
+            }
+            lock (_sleepGate)
+            {
+                if (CurrentPhase != Phase.Running) return; // 观察期内被手动停止等：放弃休眠
+                SetPhase(Phase.Sleeping);
+            }
+            await SaveAllSlotsBeforeStopAsync().ConfigureAwait(false);
+            Interlocked.Increment(ref _sleepCount); // C-102：休眠计数
+            Log?.Invoke($"{IdleMinutes} 分钟无请求，自动休眠（累计 #{Volatile.Read(ref _sleepCount)}，inflight 峰值 {Volatile.Read(ref _inflightPeak)}），正在释放显存…");
+            RaiseStatus("闲置超时，正在释放显存…");
+            _server.Stop(); // Exited 事件将把状态拉回 Standby
+        }
+        finally
+        {
+            lock (_sleepGate) { _sleepPreparing = false; }
+        }
+    }
+
+    /// <summary>
+    /// 休眠前逐槽保存 KV 快照（仅 KvCache=true 的绑定）：进程即将终止，槽位内存 KV 仅此一次落盘机会；
+    /// 唤醒后各 key 首次请求将 restore 快照跳过全量 prefill。整体 60s 超时保底（后端卡死不阻塞休眠）。
+    /// </summary>
+    private async Task SaveAllSlotsBeforeStopAsync()
+    {
+        var aff = _affinity;
+        var kv = _kvCache;
+        if (aff == null || kv == null) return; // --slots 未启用：无快照能力，直接休眠
+        var saveAll = Task.Run(async () =>
+        {
+            foreach (var b in aff.Snapshot()) // (Key, App, Slot, LastActive, Preemptive, KvCache)
+            {
+                if (!b.KvCache)
+                {
+                    SlotLog?.Invoke($"休眠前跳过 save：{b.Key}（KV Cache 已关闭）");
+                    continue;
+                }
+                try
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    await kv.SaveAsync(b.Slot, b.Key).ConfigureAwait(false);
+                    Log?.Invoke($"[KV-SAVE] 休眠前快照：{b.Key} → slot{b.Slot}（{sw.Elapsed.TotalSeconds:F1}s）");
+                    SlotLog?.Invoke($"[KV-SAVE] 休眠前快照：{b.Key} → slot{b.Slot}（{sw.Elapsed.TotalSeconds:F1}s）");
+                }
+                catch (Exception ex)
+                {
+                    Log?.Invoke($"休眠前 KV 保存失败：{b.Key}（{ex.Message}），该槽位 KV 将丢失，唤醒后全量 prefill。");
+                    SlotLog?.Invoke($"休眠前 KV 保存失败：{b.Key}（{ex.Message}）");
+                }
+            }
+        });
+        try { await saveAll.WaitAsync(TimeSpan.FromSeconds(60)).ConfigureAwait(false); }
+        catch (TimeoutException) { Log?.Invoke("休眠前 KV 保存超时（60s），放弃剩余快照，继续休眠。"); }
     }
 
     /// <summary>进程退出回调：休眠/运行态退出 → 回到监听待机；唤醒态由唤醒任务自行处理。</summary>
