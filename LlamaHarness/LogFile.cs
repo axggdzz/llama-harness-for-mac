@@ -57,6 +57,15 @@ public static class LogFile
         return Level.Info;
     }
 
+    /// <summary>最近日志快照（/__status__ 的 recent_logs 数据源；锁内复制，含全部 harness 侧日志）。</summary>
+    public static string[] SnapshotRecent()
+    {
+        lock (_gate)
+        {
+            return _recent.ToArray();
+        }
+    }
+
     /// <summary>追加一行日志（可来自任意线程）：写主日志 + 按级别写警告/错误日志。</summary>
     public static void Append(string line)
     {

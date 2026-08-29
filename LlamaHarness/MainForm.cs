@@ -1219,12 +1219,13 @@ public class MainForm : Form
         if (_config.AutoMode)
             _numPort.Enabled = false;
 
+        // 颜色语义与实际状态机对齐：Standby=待机（灰）/ Waking=唤醒中（橙黄）/ Running=运行（绿）/ Sleeping=休眠释放过渡（橙，短暂态，文本提示"正在释放显存"）
         _lblStatus.ForeColor = phase switch
         {
             SmartScheduler.Phase.Running => Color.Green,
             SmartScheduler.Phase.Waking => Color.DarkOrange,
-            SmartScheduler.Phase.Sleeping => Color.Red,
-            _ => Color.Gray,
+            SmartScheduler.Phase.Sleeping => Color.DarkOrange,
+            _ => Color.Gray, // Standby 待机
         };
     }
 

@@ -35,9 +35,9 @@ public sealed class SmartScheduler : IDisposable
 
     private Task? _wakeTask;
     private int _inflight;                       // 在途请求计数（含排队等待唤醒的）
-    private DateTime _lastTouch = DateTime.MinValue;
+    private long _lastTouchTicks = DateTime.Now.Ticks; // 闲置计时基准（Interlocked 保护，跨线程读写）
     private int _phase;                          // Phase 索引，统一经 Volatile.Read/Write 访问
-    private int _backendPort;                    // 实际运行时后端端口（自动探测空闲）
+    private volatile int _backendPort;           // 实际运行时后端端口（自动探测空闲）
     private int _tickCount;                      // 秒级 tick 计数（定时器周期 1s），用于周期性自愈检查
     private readonly System.Collections.Generic.Queue<string> _recentOutput = new(); // 进程输出末几行，用于失败诊断
 
@@ -302,21 +302,27 @@ public sealed class SmartScheduler : IDisposable
         var reqPath = req.Url?.AbsolutePath;
         if (string.Equals(reqPath, "/__status__", StringComparison.OrdinalIgnoreCase))
         {
-            // C-103：附加最近日志快照，供外部 Agent 程序远程诊断
-            var logs = RecentOutput().Split('\n');
-            var logArr = string.Join(",", logs.Select(l => "\"" + JsonEscape(l.TrimEnd('\r')) + "\""));
-            // 槽位亲和绑定快照（--parallel>1 时）
-            var slotsStr = "";
+            // C-103：phase 输出枚举名、idle_minutes 为当前已闲置分钟数（动态值）+ 配置阈值、
+            // recent_logs 取 LogFile 环形缓冲（含 harness 侧日志），供外部 Agent 远程诊断
             var aff = _affinity;
-            if (aff != null)
+            var idleMinutes = (DateTime.Now - new DateTime(Interlocked.Read(ref _lastTouchTicks))).TotalMinutes;
+            var payload = new
             {
-                var items = aff.Snapshot()
-                    .Select(kv => $"\"{JsonEscape(kv.Key)}\":{{\"slot\":{kv.Slot},\"last_active\":\"{kv.LastActive:o}\"}}");
-                slotsStr = $",\"slots\":{{\"count\":{aff.SlotCount},\"bindings\":{{{string.Join(",", items)}}}}}";
-            }
-            await WriteJsonAsync(ctx, 200,
-                $"{{\"phase\":\"{(int)CurrentPhase}\",\"inflight\":{Volatile.Read(ref _inflight)},\"backend_port\":{_backendPort}," +
-                $"\"idle_minutes\":{IdleMinutes}{slotsStr},\"recent_logs\":[{logArr}]}}");
+                phase = CurrentPhase.ToString(),
+                inflight = Volatile.Read(ref _inflight),
+                backend_port = _backendPort,
+                idle_minutes = Math.Round(idleMinutes, 1),
+                idle_threshold_minutes = IdleMinutes,
+                slots = aff == null ? null : new
+                {
+                    count = aff.SlotCount,
+                    bindings = aff.Snapshot().ToDictionary(
+                        kv => kv.Key,
+                        kv => new { slot = kv.Slot, last_active = kv.LastActive }),
+                },
+                recent_logs = LogFile.SnapshotRecent(),
+            };
+            await WriteJsonAsync(ctx, 200, System.Text.Json.JsonSerializer.Serialize(payload));
             return;
         }
 
@@ -1489,14 +1495,14 @@ public sealed class SmartScheduler : IDisposable
 
     // ==================== 闲置休眠（15 分钟无请求自动释放） ====================
 
-    /// <summary>刷新闲置倒计时基准点。</summary>
-    private void Touch() => _lastTouch = DateTime.Now;
+    /// <summary>刷新闲置倒计时基准点（Interlocked 原子写，供多线程读取）。</summary>
+    private void Touch() => Interlocked.Exchange(ref _lastTouchTicks, DateTime.Now.Ticks);
 
     private void OnTick(object? _)
     {
         if (CurrentPhase != Phase.Running) return;
         int inflight = Volatile.Read(ref _inflight);
-        var remaining = _lastTouch.Add(TimeSpan.FromMinutes(IdleMinutes)) - DateTime.Now;
+        var remaining = new DateTime(Interlocked.Read(ref _lastTouchTicks)).Add(TimeSpan.FromMinutes(IdleMinutes)) - DateTime.Now;
         if (remaining <= TimeSpan.Zero && inflight == 0)
             SleepNow();
         else if (inflight > 0)
@@ -1528,13 +1534,13 @@ public sealed class SmartScheduler : IDisposable
     {
         try
         {
-            var touchAtEntry = _lastTouch;
+            var touchAtEntry = Interlocked.Read(ref _lastTouchTicks);
             RaiseStatus("闲置超时，10 秒后休眠（期间保存 KV 缓存）…");
-            // 静默观察期：期间任何新请求（Touch 刷新 _lastTouch）或在途任务都取消本次休眠
+            // 静默观察期：期间任何新请求（Touch 刷新基准点）或在途任务都取消本次休眠
             for (int i = 0; i < 10; i++)
             {
                 await Task.Delay(1000).ConfigureAwait(false);
-                if (Volatile.Read(ref _inflight) > 0 || _lastTouch != touchAtEntry)
+                if (Volatile.Read(ref _inflight) > 0 || Interlocked.Read(ref _lastTouchTicks) != touchAtEntry)
                 {
                     Log?.Invoke("休眠取消：观察期内有新请求或在途任务。");
                     RaiseStatus("运行中 · 休眠取消（有新活动）");
@@ -1690,10 +1696,6 @@ public sealed class SmartScheduler : IDisposable
         await resp.OutputStream.WriteAsync(buf);
         resp.Close();
     }
-
-    /// <summary>JSON 字符串转义（recent_logs 快照用）。</summary>
-    private static string JsonEscape(string s) =>
-        s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r");
 
     private static void WriteError(HttpListenerContext ctx, int code, string msg)
     {
