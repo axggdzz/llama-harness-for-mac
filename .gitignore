@@ -4,3 +4,32 @@ obj/
 
 # 运行时生成的本地配置（含本机模型/exe 路径，不入库）
 config.json
+
+# SSE 调试 dump / 临时请求文件
+direct_8081_body.txt
+direct_8081_headers.txt
+dsh_exact_body.txt
+dsh_exact_headers.txt
+dsh_exact_req.json
+dsh_style_req.json
+intent_body.txt
+intent_judge_req.json
+llama-harness-config.json
+nonstream_body.txt
+nonstream_headers.txt
+nonstream_req.json
+nothink_body.txt
+sse_headers.txt
+sse_test5.txt
+sse_test_req3.json
+test_notthink.json
+docs/request_dump.log
+
+# 调试脚本
+extract_full.ps1
+extract_req.ps1
+list_reqs.ps1
+parse_sse.ps1
+
+# 临时视图
+views/
