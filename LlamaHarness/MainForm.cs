@@ -430,15 +430,27 @@ public class MainForm : Form
                 using (var g = Graphics.FromImage(img))
                     g.DrawImage(src, 0, 0, 16, 16);
 
-                // 黑色图标 → 白色：逐像素反转（R/G/B 取反），透明像素保持透明
+                // 黑色图标 → 白色：检测非透明像素平均亮度，偏黑（<128）才反转，白底黑图保持原样
+                int totalA = 0, totalLum = 0;
                 for (int y = 0; y < 16; y++)
-                {
                     for (int x = 0; x < 16; x++)
                     {
                         var p = img.GetPixel(x, y);
-                        if (p.A > 0) // 非透明像素才处理
-                            img.SetPixel(x, y, Color.FromArgb(p.A, 255 - p.R, 255 - p.G, 255 - p.B));
+                        if (p.A > 0)
+                        {
+                            totalA++;
+                            totalLum += (p.R + p.G + p.B) / 3; // 简单亮度估算
+                        }
                     }
+                if (totalA > 0 && totalLum / totalA < 128) // 平均亮度偏黑 → 反转
+                {
+                    for (int y = 0; y < 16; y++)
+                        for (int x = 0; x < 16; x++)
+                        {
+                            var p = img.GetPixel(x, y);
+                            if (p.A > 0)
+                                img.SetPixel(x, y, Color.FromArgb(p.A, 255 - p.R, 255 - p.G, 255 - p.B));
+                        }
                 }
 
                 IconCache[fileName] = img;
