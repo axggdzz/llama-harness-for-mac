@@ -75,47 +75,87 @@ public static class OutputContinuer
             if (outcome != RoundOutcome.Truncated)
                 return (outcome != RoundOutcome.Aborted, state.Accumulated.ToString());
 
-            // 截断断点回调（§4.1）：续接请求发出前触发，槽位 KV 仍完整（可 save 断点快照）；失败不阻断续接
-            if (onTruncation != null)
-            {
-                try { await onTruncation(); } catch { /* 断点快照失败不影响续接 */ }
-            }
-
-            // 构造续接请求：追加 assistant 输出 + 续接指令（originalBody 含 n_slots → 同槽亲和，KV 前缀命中免重算）
-            var nextBody = BuildContinuationBody(originalBody, state.Accumulated.ToString());
-            if (nextBody == null) return (false, state.Accumulated.ToString());
-            originalBody = nextBody;
-
-            // TokenGuard 防护（续接输入可能超预算）
-            int budget = cfg.GetInputBudget();
-            var (ok, guarded, note) = await TokenGuard.GuardAsync(hc, backendPort, originalBody, budget);
-            if (!ok) { log?.Invoke($"续接中止：{note}"); return (false, state.Accumulated.ToString()); }
-            if (guarded != null && guarded != originalBody) originalBody = guarded;
-            if (note != null) log?.Invoke(note);
-
-            // 发起下一轮推理
+            // P1：跨轮 keep-alive——等待下一轮期间（KV save / tokenize / prefill）周期写 SSE 注释行，
+            // 防客户端空闲超时掐线；本轮响应到手后取消并等最后一条注释写完再开下一轮管道，防 SSE 行交错
+            using var kaCts = new CancellationTokenSource();
+            var keepAlive = RunKeepAlive(outResp, writeGate, kaCts.Token);
             try
             {
-                using var req = new HttpRequestMessage(HttpMethod.Post, uri)
+                // 截断断点回调（§4.1）：续接请求发出前触发，槽位 KV 仍完整（可 save 断点快照）；失败不阻断续接
+                if (onTruncation != null)
                 {
-                    Content = new StringContent(originalBody, Encoding.UTF8, "application/json"),
-                };
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(cfg.ContinuationTimeoutSeconds));
-                resp = await hc.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token);
-                round++;
-                log?.Invoke($"续接触发（第 {round} 轮）：输出截断（finish_reason=length），自动续接…");
+                    try { await onTruncation(); } catch { /* 断点快照失败不影响续接 */ }
+                }
+
+                // 构造续接请求：追加 assistant 输出 + 续接指令（originalBody 含 n_slots → 同槽亲和，KV 前缀命中免重算）
+                var nextBody = BuildContinuationBody(originalBody, state.Accumulated.ToString());
+                if (nextBody == null) return (false, state.Accumulated.ToString());
+                originalBody = nextBody;
+
+                // TokenGuard 防护（续接输入可能超预算）
+                int budget = cfg.GetInputBudget();
+                var (ok, guarded, note) = await TokenGuard.GuardAsync(hc, backendPort, originalBody, budget);
+                if (!ok) { log?.Invoke($"续接中止：{note}"); return (false, state.Accumulated.ToString()); }
+                if (guarded != null && guarded != originalBody) originalBody = guarded;
+                if (note != null) log?.Invoke(note);
+
+                // 发起下一轮推理
+                try
+                {
+                    using var req = new HttpRequestMessage(HttpMethod.Post, uri)
+                    {
+                        Content = new StringContent(originalBody, Encoding.UTF8, "application/json"),
+                    };
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(cfg.ContinuationTimeoutSeconds));
+                    resp = await hc.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+                    round++;
+                    log?.Invoke($"续接触发（第 {round} 轮）：输出截断（finish_reason=length），自动续接…");
+                }
+                catch (Exception ex)
+                {
+                    log?.Invoke($"续接请求异常（第 {round + 1} 轮）：{ex.Message}");
+                    return (false, state.Accumulated.ToString());
+                }
             }
-            catch (Exception ex)
+            finally
             {
-                log?.Invoke($"续接请求异常（第 {round + 1} 轮）：{ex.Message}");
-                return (false, state.Accumulated.ToString());
+                kaCts.Cancel();
+                await keepAlive; // 等最后一条注释行写完再开下一轮管道
             }
         }
     }
 
+    /// <summary>P1：跨轮 keep-alive——等待下一轮期间周期写 SSE 注释行（客户端按规范忽略），防空闲超时掐线。</summary>
+    private static Task RunKeepAlive(HttpListenerResponse outResp, SemaphoreSlim? writeGate, CancellationToken ct)
+    {
+        return Task.Run(async () =>
+        {
+            try
+            {
+                while (!ct.IsCancellationRequested)
+                {
+                    await Task.Delay(2000, ct);
+                    var bytes = Encoding.UTF8.GetBytes(": 续接中…\n");
+                    if (writeGate != null) await writeGate.WaitAsync();
+                    try
+                    {
+                        await outResp.OutputStream.WriteAsync(bytes);
+                        await outResp.OutputStream.FlushAsync();
+                    }
+                    finally
+                    {
+                        if (writeGate != null) writeGate.Release();
+                    }
+                }
+            }
+            catch (OperationCanceledException) { /* 正常取消 */ }
+            catch { /* 客户端已断开，keep-alive 失败不影响主流程 */ }
+        });
+    }
+
     /// <summary>
     /// 灌一轮 SSE 到客户端并累积内容；末块（含 finish_reason）暂扣待决策/改写。
-    /// Normal = 正常结束；Truncated = 需续接（末块已剥离 finish_reason，客户端继续等待下一轮流）；
+    /// Normal = 正常结束；Truncated = 需续接（末块已剥离 finish_reason、本轮 [DONE] 抑制不写，客户端继续等待下一轮流）；
     /// Aborted = 流在无 [DONE] 时中断（崩溃迹象）。
     /// </summary>
     private static async Task<RoundOutcome> PipeOneRoundAsync(
@@ -249,20 +289,25 @@ public static class OutputContinuer
                 finalPayload = finalObj.ToJsonString();
             }
             await ForwardAsync("data: " + finalPayload);
-            // 暂扣行（含 [DONE]）整体持锁写入，防 keep-alive 在末块与 [DONE] 之间插入
-            if (writeGate != null) await writeGate.WaitAsync();
-            try
+            // P0：暂扣行（含 [DONE]）只在真正末轮写出——续接分支若泄漏 [DONE]，客户端会判定流结束而断开连接，
+            // 后续轮输出永远不可见，续接链路被毁。续接时丢弃本轮 [DONE]，留给真正末轮。
+            if (!doContinue)
             {
-                foreach (var h in held)
+                // 整体持锁写入，防 keep-alive 在末块与 [DONE] 之间插入
+                if (writeGate != null) await writeGate.WaitAsync();
+                try
                 {
-                    var bytes = Encoding.UTF8.GetBytes(h);
-                    await outResp.OutputStream.WriteAsync(bytes);
+                    foreach (var h in held)
+                    {
+                        var bytes = Encoding.UTF8.GetBytes(h);
+                        await outResp.OutputStream.WriteAsync(bytes);
+                    }
+                    await outResp.OutputStream.FlushAsync();
                 }
-                await outResp.OutputStream.FlushAsync();
-            }
-            finally
-            {
-                if (writeGate != null) writeGate.Release();
+                finally
+                {
+                    if (writeGate != null) writeGate.Release();
+                }
             }
             return doContinue ? RoundOutcome.Truncated : RoundOutcome.Normal;
         }
