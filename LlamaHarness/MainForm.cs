@@ -10,58 +10,61 @@ public class MainForm : Form
     private readonly AppConfig _config;
     private readonly SmartScheduler _scheduler;
 
-    // —— 参数控件 ——
-    private readonly TextBox _txtExe = new() { Dock = DockStyle.Fill };
-    private readonly Button _btnBrowseExe = new() { Text = "浏览…", Size = new Size(100, 32) };
-    private readonly TextBox _txtModel = new() { Dock = DockStyle.Fill };
-    private readonly Button _btnBrowseModel = new() { Text = "浏览…", Size = new Size(100, 32) };
-    private readonly NumericUpDown _numPort = new() { Minimum = 1, Maximum = 65534, Dock = DockStyle.Fill };
-    private readonly NumericUpDown _numCtx = new() { Minimum = 256, Maximum = 1_048_576, Dock = DockStyle.Fill };
-    private readonly NumericUpDown _numNgl = new() { Minimum = 0, Maximum = 999, Dock = DockStyle.Fill };
-    private readonly NumericUpDown _numParallel = new() { Minimum = 1, Maximum = 128, Dock = DockStyle.Fill };
-    private readonly CheckBox _chkNoKv = new() { Text = "启用 --no-kv-unified", Dock = DockStyle.Fill };
-    private readonly NumericUpDown _numThreads = new() { Minimum = 1, Maximum = 512, Dock = DockStyle.Fill };
-    private readonly TextBox _txtExtra = new() { Dock = DockStyle.Fill };
-    private readonly CheckBox _chkAuto = new() { Text = "智能按需模式（代理监听 + 闲置自动休眠，推荐）", Dock = DockStyle.Fill };
-    private readonly NumericUpDown _numIdleMin = new() { Minimum = 1, Maximum = 120, Dock = DockStyle.Fill };
-    private readonly TextBox _txtPcoreMask = new() { Dock = DockStyle.Fill }; // P 核亲和性掩码（十六进制，留空禁用）
-    private readonly CheckBox _chkForceStream = new() { Text = "将非流式请求改写为 stream=true", Dock = DockStyle.Fill };
-    private readonly ToolTip _tooltip = new(); // 提示气泡（附加参数引号说明），须为字段保持存活
+    // —— 参数控件（Configuration 面板内）——
+    private readonly TextBox _txtExe = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White, BorderStyle = BorderStyle.None };
+    private readonly Button _btnBrowseExe = new() { Text = "…", Size = new Size(32, 28), FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(55, 55, 55), ForeColor = Color.White };
+    private readonly TextBox _txtModel = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White, BorderStyle = BorderStyle.None };
+    private readonly Button _btnBrowseModel = new() { Text = "…", Size = new Size(32, 28), FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(55, 55, 55), ForeColor = Color.White };
+    private readonly NumericUpDown _numPort = new() { Minimum = 1, Maximum = 65534, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
+    private readonly NumericUpDown _numCtx = new() { Minimum = 256, Maximum = 1_048_576, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
+    private readonly NumericUpDown _numNgl = new() { Minimum = 0, Maximum = 999, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
+    private readonly NumericUpDown _numParallel = new() { Minimum = 1, Maximum = 128, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
+    private readonly CheckBox _chkNoKv = new() { Text = "--no-kv-unified", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
+    private readonly NumericUpDown _numThreads = new() { Minimum = 1, Maximum = 512, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
+    private readonly TextBox _txtExtra = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White, BorderStyle = BorderStyle.None };
+    private readonly CheckBox _chkAuto = new() { Text = "智能按需模式（推荐）", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
+    private readonly NumericUpDown _numIdleMin = new() { Minimum = 1, Maximum = 120, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
+    private readonly TextBox _txtPcoreMask = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White, BorderStyle = BorderStyle.None };
+    private readonly CheckBox _chkForceStream = new() { Text = "强制流式", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
+    private readonly TextBox _txtKvCachePath = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White, BorderStyle = BorderStyle.None };
+    private readonly CheckBox _chkTokenGuard = new() { Text = "Token Guard（防上下文超长）", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
+    private readonly NumericUpDown _numReservedTokens = new() { Minimum = 512, Maximum = 131_072, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
+    private readonly CheckBox _chkContinuation = new() { Text = "输出续接（截断自动续写）", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
+    private readonly NumericUpDown _numMaxContinuations = new() { Minimum = 1, Maximum = 50, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
+    private readonly NumericUpDown _numContTimeout = new() { Minimum = 30, Maximum = 3600, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
+    private readonly CheckBox _chkCrashRecover = new() { Text = "bad_alloc 自动恢复（快照接续/重放）", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
+    private readonly NumericUpDown _numMaxRestarts = new() { Minimum = 0, Maximum = 10, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
+    // §4.2 自动强占（冻结防驱逐）：按应用类型前缀，勾选 → 该类型绑定强制 Preemptive=true
+    private readonly CheckBox _chkAutoPreDshRule = new() { Text = "DSH规则", AutoSize = true, ForeColor = Color.FromArgb(200, 200, 200) };
+    private readonly CheckBox _chkAutoPreWebui = new() { Text = "WebUI", AutoSize = true, ForeColor = Color.FromArgb(200, 200, 200) };
+    private readonly CheckBox _chkAutoPreTrae = new() { Text = "Trae", AutoSize = true, ForeColor = Color.FromArgb(200, 200, 200) };
+    private readonly CheckBox _chkAutoPreDshAgent = new() { Text = "DSH Agent", AutoSize = true, ForeColor = Color.FromArgb(200, 200, 200) };
+    private readonly ToolTip _tooltip = new();
 
-    // —— 操作区 ——
-    // 所有按钮统一尺寸 100x32（与浏览按钮一致）；不用 Dock，Dock 会覆盖固定 Size
-    private readonly Button _btnStart = new() { Text = "启动 / 唤醒", Size = new Size(100, 32) };
-    private readonly Button _btnStop = new() { Text = "停止", Size = new Size(100, 32), Enabled = false };
-    private readonly Button _btnClearLog = new() { Text = "清空日志", Size = new Size(100, 32) };
-    private readonly Button _btnExportCfg = new() { Text = "保存配置到…", Size = new Size(100, 32) };
-    private readonly Button _btnImportCfg = new() { Text = "载入配置", Size = new Size(100, 32) };
-    private readonly Label _lblStatus = new() { Text = "空闲", Dock = DockStyle.Fill, ForeColor = Color.Gray };
-    // 思考模式状态标签（操作行右侧）
+    // —— 操作按钮（Control Panel 区）——
+    private Button _btnStart;
+    private Button _btnStop;
+    private Button _btnClearLog;
+    private Button _btnClearCache;
+    private Button _btnExportCfg;
+    private Button _btnImportCfg;
+    private Label _lblStatus;
+
+    // —— 思考模式状态标签（侧边统计面板）——
     private readonly Label _lblThinking = new()
     {
         Text = "思考: 极速",
-        Dock = DockStyle.Fill,
-        TextAlign = ContentAlignment.MiddleRight,
         ForeColor = Color.Silver,
-        Margin = new Padding(8, 0, 4, 0),
     };
 
-    // —— 系统资源统计（操作行下方，2 秒轮询）——
+    // —— 系统资源统计（2 秒轮询）——
     private readonly SystemMetrics _metrics = new();
-    private readonly Label _lblRes = new()
-    {
-        // 必须是 Top：窗口内只能有一个 Fill 控件（_split），
-        // 若此处用 Fill 会与之竞争导致两者被压成零尺寸
-        Dock = DockStyle.Top,
-        Height = 24,
-        TextAlign = ContentAlignment.MiddleLeft,
-        ForeColor = Color.DimGray,
-        Margin = new Padding(8, 0, 8, 4),
-    };
+    private Label _lblResDetail;
     private readonly System.Windows.Forms.Timer _metricsTimer = new() { Interval = 2000 };
-    private int _metricsBusy; // 0=空闲 1=采样中（防重叠：nvidia-smi 可能耗时数秒）
+    private int _metricsBusy;
+    private bool _crashAlertShown; // 崩溃熔断红色告警状态（防重复告警；窗口滑出后自动恢复）
 
-    // —— 日志区（RichTextBox：支持按行独立着色，历史行颜色不随新行改变）——
+    // —— 日志区（RichTextBox：按行独立着色 + 防抖）——
     private readonly RichTextBox _txtLog = new()
     {
         Dock = DockStyle.Fill,
@@ -69,33 +72,31 @@ public class MainForm : Form
         ReadOnly = true,
         ScrollBars = RichTextBoxScrollBars.Vertical,
         WordWrap = false,
-        BackColor = Color.FromArgb(30, 30, 30),
-        ForeColor = Color.Gainsboro,
+        BackColor = Color.FromArgb(24, 24, 24),
+        ForeColor = Color.FromArgb(200, 200, 200),
         Font = new Font("Consolas", 9F),
     };
-    // 日志防抖：高频日志先入队列，UI 定时器批量消费（减少 RichTextBox 重绘次数，消除闪烁）
     private readonly Queue<(string line, string entry)> _logQueue = new();
     private readonly System.Windows.Forms.Timer _logFlushTimer = new() { Interval = 150 };
 
     // —— 统计区（实时解析 print_timing）——
     private readonly LlamaStatsParser _statsParser = new();
-    private readonly SplitContainer _split = new()
-    {
-        Dock = DockStyle.Fill,
-        Orientation = Orientation.Horizontal,
-        SplitterWidth = 5,
-    };
     private readonly Label _lblSummary = new()
     {
-        Dock = DockStyle.Fill,
+        Dock = DockStyle.Top,
         AutoSize = true,
         TextAlign = ContentAlignment.MiddleLeft,
-        Margin = new Padding(4, 6, 4, 2),
+        ForeColor = Color.FromArgb(100, 200, 255),
+        Font = new Font("Consolas", 9F),
+        Margin = new Padding(4, 4, 4, 4),
     };
     private readonly Button _btnClearStats = new()
     {
         Text = "清空统计",
-        Size = new Size(100, 32),
+        Size = new Size(80, 26),
+        FlatStyle = FlatStyle.Flat,
+        BackColor = Color.FromArgb(55, 55, 55),
+        ForeColor = Color.White,
     };
     private readonly DataGridView _gridStats = new()
     {
@@ -104,9 +105,23 @@ public class MainForm : Form
         AllowUserToAddRows = false,
         AllowUserToResizeRows = false,
         AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-        BackgroundColor = Color.FromArgb(245, 245, 245),
+        BackgroundColor = Color.FromArgb(35, 35, 35),
+        ForeColor = Color.FromArgb(212, 212, 212),
+        GridColor = Color.FromArgb(60, 60, 60),
+        RowHeadersVisible = false,
         RowTemplate = new DataGridViewRow { Height = 22 },
     };
+
+    // —— 槽位绑定表格（TabControl 页签3）——
+    private DataGridView _gridSlots;
+    // —— 槽位管理表格（TabControl 页签6，强占/KV缓存可编辑）——
+    private DataGridView _gridSlotMgmt;
+    // —— 槽位日志（槽位绑定页下方，独立持久化 slot.log）——
+    private RichTextBox _txtSlotLog;
+
+    // —— 侧边统计标签 ——
+    private Label _lblTokenSummary;
+    private Label _lblSlotSummary;
 
     public MainForm()
     {
@@ -130,6 +145,10 @@ public class MainForm : Form
         _scheduler.StatsReset += () => _statsParser.Reset();
         // 思考模式状态变更 → UI 标签
         _scheduler.ThinkingModeChanged += OnThinkingModeChanged;
+        // 槽位绑定变更 → 刷新槽位表格
+        _scheduler.SlotBindingChanged += RefreshSlotBindings;
+        // 槽位日志（绑定/驱逐/KV Cache）→ 槽位页 RichTextBox + slot.log 持久化
+        _scheduler.SlotLog += OnSlotLog;
 
         // 启动时按当前附加参数显示初始思考模式（唤醒时会按实际启动参数权威重置）
         RefreshThinkingLabel();
@@ -151,8 +170,6 @@ public class MainForm : Form
 
     private void OnShown(object? sender, EventArgs e)
     {
-        // 日志区占 60%、统计区占 40%（用户可拖拽调整）
-        _split.SplitterDistance = Math.Max(_split.Height * 3 / 5, 100);
         _scheduler.Initialize();
 
         // 资源轮询：CPU 需两次采样取差值，首次 tick 建立基准
@@ -165,10 +182,10 @@ public class MainForm : Form
         _logFlushTimer.Start();
     }
 
-    /// <summary>每 2 秒刷新资源标签。nvidia-smi 查询可能阻塞数百毫秒，放后台线程执行；同一时刻仅一个未完成采样，防线程堆积。</summary>
+    /// <summary>每 2 秒刷新系统资源页签 + 轮询崩溃熔断状态（红色告警）。</summary>
     private void OnMetricsTick(object? sender, EventArgs e)
     {
-        if (Interlocked.Exchange(ref _metricsBusy, 1) == 1) return; // 上一轮还在跑，跳过本轮
+        if (Interlocked.Exchange(ref _metricsBusy, 1) == 1) return;
         Task.Run(async () =>
         {
             try
@@ -176,9 +193,29 @@ public class MainForm : Form
                 double cpu = _metrics.GetCpuPercent();
                 var (used, total) = _metrics.GetMemory();
                 string? vram = await _metrics.GetVramTextAsync();
-                if (IsDisposed) return; // 窗口已关闭，丢弃本轮结果
-                BeginInvoke(() => _lblRes.Text =
-                    $"CPU: {cpu:F0}%   |   内存: {used:F1}/{total:F1} GB   |   显存: {(vram ?? "—（未检测到 nvidia-smi）")}");
+                bool tripped = CrashRecovery.IsTripped;
+                if (IsDisposed) return;
+                BeginInvoke(() =>
+                {
+                    _lblResDetail.Text =
+                        $"CPU:      {cpu:F0}%\n" +
+                        $"内存:     {used:F1} / {total:F1} GB\n" +
+                        $"显存:     {(vram ?? "—（未检测到 nvidia-smi）")}";
+
+                    // 崩溃熔断红色告警：状态切换时醒目日志 + 状态栏变红；窗口滑出后恢复
+                    if (tripped && !_crashAlertShown)
+                    {
+                        _crashAlertShown = true;
+                        AppendLog("⚠⚠ 崩溃熔断器已跳闸：10 分钟内 ≥3 次 bad_alloc，自动恢复已停止。请加内存 / 降上下文后手动重试！");
+                        _lblStatus.ForeColor = Color.FromArgb(0xF5, 0x3F, 0x3F);
+                        _lblStatus.Text = "⚠ 崩溃熔断：自动恢复已停止，需人工介入";
+                    }
+                    else if (!tripped && _crashAlertShown)
+                    {
+                        _crashAlertShown = false;
+                        ApplyPhase(_scheduler.CurrentPhase); // 按当前阶段重渲染状态栏颜色
+                    }
+                });
             }
             finally
             {
@@ -191,99 +228,290 @@ public class MainForm : Form
 
     private void BuildUi()
     {
-        Text = "llama.cpp 智能启动器";
-        ClientSize = new Size(880, 640);
-        MinimumSize = new Size(700, 480);
+        Text = "Llama Harness";
+        ClientSize = new Size(1280, 800);
+        MinimumSize = new Size(1000, 600);
         StartPosition = FormStartPosition.CenterScreen;
 
-        // 参数区（表格布局：标签 | 控件 | 浏览按钮）
-        var paramPanel = new TableLayoutPanel
+        // ════════════ 全局色值（方案 3.1）════════════
+        var cBg = Color.FromArgb(0x0F, 0x11, 0x17);       // #0F1117 页面背景
+        var cCard = Color.FromArgb(0x16, 0x1A, 0x23);     // #161A23 卡片面板
+        var cBottom = Color.FromArgb(0x1A, 0x1F, 0x29);   // #1A1F29 底部状态栏
+        var cPrimary = Color.FromArgb(0x40, 0xA9, 0xFF);  // #40A9FF 主题主色
+        var cTitle = Color.FromArgb(0xF5, 0xF7, 0xFA);    // #F5F7FA 一级标题
+        var cBody = Color.FromArgb(0xC9, 0xCD, 0xD4);     // #C9CDD4 二级正文
+        var cAux = Color.FromArgb(0x86, 0x90, 0x9C);      // #86909C 辅助说明
+        var cBorder = Color.FromArgb(30, 35, 45);         // rgba(255,255,255,0.08) 近似
+        var cGreen = Color.FromArgb(0x52, 0xC4, 0x1A);    // #52C41A 正常
+        var cRed = Color.FromArgb(0xF5, 0x3F, 0x3F);      // #F53F3F 异常
+
+        BackColor = cBg;
+        ForeColor = cBody;
+
+        // ════════════ 左侧面板 (240px) ════════════
+        var leftPanel = new Panel
         {
-            Dock = DockStyle.Top,
-            ColumnCount = 3,
-            Padding = new Padding(8, 8, 8, 2),
-            AutoSize = true,
+            Dock = DockStyle.Left,
+            Width = 240,
+            BackColor = cCard,
+            Padding = new Padding(16),
+            AutoScroll = true,
         };
-        paramPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        paramPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        paramPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
-        AddRow(paramPanel, MakeLabel("llama-server.exe："), _txtExe, _btnBrowseExe);
-        AddRow(paramPanel, MakeLabel("模型文件（.gguf）："), _txtModel, _btnBrowseModel);
-        AddRow(paramPanel, MakeLabel("端口（--port，智能模式下为代理监听端口）："), _numPort, null);
-        AddRow(paramPanel, MakeLabel("上下文长度（-c）："), _numCtx, null);
-        AddRow(paramPanel, MakeLabel("GPU 层数（-ngl）："), _numNgl, null);
-        AddRow(paramPanel, MakeLabel("并发（--parallel）："), _numParallel, null);
-        AddRow(paramPanel, MakeLabel("--no-kv-unified："), _chkNoKv, null);
-        AddRow(paramPanel, MakeLabel("线程数（-t）："), _numThreads, null);
-        AddRow(paramPanel, MakeLabel("附加参数（可选）："), _txtExtra, null);
-        // 附加参数原样拼入命令行，含空格的值需用户自行加引号
-        _tooltip.SetToolTip(_txtExtra, "原样拼入命令行，不做再解析；含空格的路径需加引号，例如：--mmproj \"D:\\path\\projector.gguf\"");
-        AddRow(paramPanel, MakeLabel("闲置休眠分钟数："), _numIdleMin, null);
-        AddRow(paramPanel, MakeLabel("P核掩码（十六进制，13900F=0x0000FFFF，留空禁用）："), _txtPcoreMask, null);
-        AddRow(paramPanel, MakeLabel("强制流式："), _chkForceStream, null);
-        // 仅当客户端能解析 SSE 流时才开启；标准 OpenAI SDK 客户端期望 JSON，开启会破坏解析
-        _tooltip.SetToolTip(_chkForceStream, "把非流式推理请求改写为 stream=true 并直通 SSE。防客户端读超时→断开→全量重填。仅适用于能解析 SSE 流的客户端；标准 OpenAI SDK 客户端勿开。");
-        AddRow(paramPanel, MakeLabel("模式："), _chkAuto, null);
+        // ── Control Panel ──
+        var lblCtrlTitle = MakeSectionTitle("Control Panel", cPrimary);
+        var btnStart = MakeBtn("启动 / 唤醒", cCard, cBody);
+        var btnStop = MakeBtn("停止", Color.FromArgb(0x3A, 0x20, 0x20), cRed, enabled: false);
+        var btnClearLog = MakeBtn("清空日志", cCard, cBody);
+        var btnClearCache = MakeBtn("清空缓存", cCard, cBody, h: 30);
+        var lblStatus = new Label { Text = "空闲", Dock = DockStyle.Fill, ForeColor = cAux, Font = new Font("Microsoft YaHei UI", 9F), TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(0, 6, 0, 12) };
 
-        // 操作区
-        var opPanel = new TableLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            ColumnCount = 7,
-            Padding = new Padding(8, 6, 8, 6),
-            AutoSize = true,
-        };
-        opPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (int i = 0; i < 5; i++)
-            opPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        opPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); // 思考模式标签
-        opPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        opPanel.Controls.Add(_lblStatus, 0, 0);
-        opPanel.Controls.Add(_btnClearLog, 1, 0);
-        opPanel.Controls.Add(_btnExportCfg, 2, 0);   // 清空日志旁：保存配置到…
-        opPanel.Controls.Add(_btnImportCfg, 3, 0);  // 载入配置
-        opPanel.Controls.Add(_btnStop, 4, 0);
-        opPanel.Controls.Add(_btnStart, 5, 0);
-        opPanel.Controls.Add(_lblThinking, 6, 0);   // 思考模式状态
+        // ── Configuration ──
+        var lblCfgTitle = MakeSectionTitle("Configuration", cPrimary);
+        var btnSlotMgmt = MakeBtn("槽位管理", cCard, cBody, h: 30);
+        var btnOpenConfig = MakeBtn("⚙ 配置管理", cCard, cBody);
+        var btnExport = MakeBtn("保存配置到…", cCard, cBody, h: 30);
+        var btnImport = MakeBtn("载入配置", cCard, cBody, h: 30);
 
-        // —— 统计面板（汇总行 + 表格）——
-        var statsPanel = new TableLayoutPanel
+        // ── User Manual ──
+        var lblManualTitle = MakeSectionTitle("User Manual", cPrimary);
+        var btnHelp = MakeBtn("使用说明", cCard, cPrimary, h: 30);
+        var btnFaq = MakeBtn("常见问题", cCard, cPrimary, h: 30);
+        var btnChangelog = MakeBtn("更新内容", cCard, cPrimary, h: 30);
+
+        var leftFlow = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            Padding = new Padding(8, 2, 8, 6),
+            FlowDirection = FlowDirection.TopDown,
+            AutoScroll = true,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+            BackColor = Color.Transparent,
         };
-        statsPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        statsPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        statsPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        statsPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        statsPanel.Controls.Add(_lblSummary, 0, 0);
-        statsPanel.Controls.Add(_btnClearStats, 1, 0);
-        statsPanel.Controls.Add(_gridStats, 0, 1);
-        statsPanel.SetColumnSpan(_gridStats, 2);
+        leftFlow.Controls.AddRange(new Control[]
+        {
+            lblCtrlTitle, btnStart, btnStop, btnClearLog, btnClearCache, lblStatus,
+            lblCfgTitle, btnSlotMgmt, btnOpenConfig, btnExport, btnImport,
+            lblManualTitle, btnHelp, btnFaq, btnChangelog
+        });
+        leftPanel.Controls.Add(leftFlow);
 
-        // 日志 / 统计上下分栏（可拖拽；SplitterDistance 在 Shown 后按实际高度分配）
-        _split.Panel1.Controls.Add(_txtLog);
-        _split.Panel2.Controls.Add(statsPanel);
+        // ════════════ 右侧区域 ════════════
+        var rightSplit = new SplitContainer
+        {
+            Dock = DockStyle.Fill,
+            Orientation = Orientation.Horizontal,
+            SplitterWidth = 4,
+            BackColor = cBg,
+        };
 
-        // Dock 添加顺序：先 Fill，再 Top（Top 控件按添加顺序自下而上堆叠）
-        Controls.Add(_split);
-        Controls.Add(_lblRes);   // 资源行：位于操作行下方
-        Controls.Add(opPanel);
-        Controls.Add(paramPanel);
+        // ── 标题栏 (44px) ──
+        var titleBar = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 44,
+            BackColor = cCard,
+        };
+        var lblTitle = new Label
+        {
+            Text = "Llama Harness",
+            Font = new Font("Microsoft YaHei UI", 14F, FontStyle.Bold),
+            ForeColor = cPrimary,
+            AutoSize = true,
+            Margin = new Padding(16, 6, 0, 0),
+        };
+        var lblSlogan = new Label
+        {
+            Text = "智能代理网关 · 双槽 KV 复用 · 思考模式拦截",
+            Font = new Font("Microsoft YaHei UI", 10F),
+            ForeColor = cAux,
+            AutoSize = true,
+            Margin = new Padding(190, 14, 0, 0),
+        };
+        titleBar.Controls.Add(lblTitle);
+        titleBar.Controls.Add(lblSlogan);
 
-        // 统计表格列
-        _gridStats.Columns.AddRange(
-            MakeGridCol("时间"),
-            MakeGridCol("输入tokens"),
-            MakeGridCol("输入速度(t/s)"),
-            MakeGridCol("输出tokens"),
-            MakeGridCol("输出速度(t/s)"),
-            MakeGridCol("命中率(accepted/generated)"),
-            MakeGridCol("f_sim_best"),
-            MakeGridCol("总耗时(s)"));
+        // ── TabControl ──
+        var tabHost = new Panel { Dock = DockStyle.Fill, BackColor = cBg };
+        var tabControl = new TabControl
+        {
+            Dock = DockStyle.Fill,
+            BackColor = cBg,
+            ForeColor = cBody,
+        };
+
+        var tabLog = new TabPage("日志") { BackColor = cBg, Padding = new Padding(10) };
+        _txtLog.BackColor = Color.FromArgb(0x0A, 0x0C, 0x10);
+        _txtLog.ForeColor = cBody;
+        tabLog.Controls.Add(_txtLog);
+
+        var tabStats = new TabPage("统计") { BackColor = cBg, Padding = new Padding(10) };
+        tabStats.Controls.Add(BuildStatsPanel(cBg, cCard, cBody, cPrimary));
+
+        // 槽位绑定页：上方绑定表格 + 下方槽位日志（独立持久化 slot.log）
+        var tabSlots = new TabPage("槽位绑定") { BackColor = cBg, Padding = new Padding(10) };
+        _txtSlotLog = new RichTextBox
+        {
+            Dock = DockStyle.Fill,
+            ReadOnly = true,
+            BackColor = Color.FromArgb(0x0A, 0x0C, 0x10),
+            ForeColor = cBody,
+            Font = new Font("Consolas", 9F),
+            ScrollBars = RichTextBoxScrollBars.Vertical,
+            WordWrap = false,
+        };
+        _gridSlots = MakeGrid(cCard, cBody);
+        _gridSlots.Dock = DockStyle.Top;
+        _gridSlots.Height = 260;
+        _gridSlots.Columns.AddRange(MakeGridCol("亲和 Key"), MakeGridCol("应用"), MakeGridCol("槽位"), MakeGridCol("最后活跃"));
+        tabSlots.Controls.Add(_txtSlotLog);
+        tabSlots.Controls.Add(_gridSlots);
+
+        // 槽位管理页：DataGridView（强占/KV缓存 CheckBox 可编辑）
+        var tabSlotMgmt = new TabPage("槽位管理") { BackColor = cBg, Padding = new Padding(10) };
+        _gridSlotMgmt = MakeGrid(cCard, cBody);
+        _gridSlotMgmt.ReadOnly = false;
+        _gridSlotMgmt.Columns.AddRange(
+            MakeGridCol("亲和 Key"), MakeGridCol("应用"), MakeGridCol("槽位"),
+            MakeCheckCol("强占"), MakeCheckCol("KV缓存"), MakeGridCol("最后活跃"));
+        _gridSlotMgmt.CellValueChanged += OnSlotMgmtCellChanged;
+        tabSlotMgmt.Controls.Add(_gridSlotMgmt);
+
+        var tabRes = new TabPage("系统资源") { BackColor = cBg, Padding = new Padding(10) };
+        _lblResDetail = new Label
+        {
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = new Font("Consolas", 12F),
+            ForeColor = cBody,
+        };
+        tabRes.Controls.Add(_lblResDetail);
+
+        var tabConfig = new TabPage("配置管理") { BackColor = cBg, Padding = new Padding(10) };
+        tabConfig.Controls.Add(BuildConfigPanel(cCard, cBody));
+
+        tabControl.TabPages.AddRange(new TabPage[] { tabLog, tabStats, tabSlots, tabSlotMgmt, tabRes, tabConfig });
+        btnOpenConfig.Click += (_, _) => tabControl.SelectedTab = tabConfig;
+        btnSlotMgmt.Click += (_, _) => tabControl.SelectedTab = tabSlotMgmt;
+        tabHost.Controls.Add(tabControl);
+        rightSplit.Panel1.Controls.Add(tabHost);
+        rightSplit.Panel1.Controls.Add(titleBar);
+
+        // ════════════ 底部 SideStatsPanel (200px, Dock=Bottom) ════════════
+        var sidePanel = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = cBottom,
+            Padding = new Padding(20, 16, 20, 16),
+        };
+        var sideGrid = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            BackColor = Color.Transparent,
+        };
+        sideGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.3f));
+        sideGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.3f));
+        sideGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.4f));
+        sideGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        // 模块1: Token 汇总
+        var colToken = new Panel { BackColor = cCard, Padding = new Padding(16), Dock = DockStyle.Fill, Margin = new Padding(0, 0, 6, 0) };
+        _lblTokenSummary = new Label
+        {
+            Text = "请求: 0",
+            Dock = DockStyle.Fill,
+            Font = new Font("Consolas", 11F),
+            ForeColor = cPrimary,
+            TextAlign = ContentAlignment.MiddleLeft,
+        };
+        var lblTokenTitle = new Label { Text = "Token 统计", Dock = DockStyle.Top, Height = 28, ForeColor = cTitle, Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft };
+        colToken.Controls.Add(_lblTokenSummary);
+        colToken.Controls.Add(lblTokenTitle);
+
+        // 模块2: 槽位绑定
+        var colSlot = new Panel { BackColor = cCard, Padding = new Padding(16), Dock = DockStyle.Fill, Margin = new Padding(6, 0, 6, 0) };
+        _lblSlotSummary = new Label
+        {
+            Text = "槽位: —",
+            Dock = DockStyle.Fill,
+            Font = new Font("Consolas", 11F),
+            ForeColor = cBody,
+            TextAlign = ContentAlignment.MiddleLeft,
+        };
+        var lblSlotTitle = new Label { Text = "槽位绑定", Dock = DockStyle.Top, Height = 28, ForeColor = cTitle, Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft };
+        colSlot.Controls.Add(_lblSlotSummary);
+        colSlot.Controls.Add(lblSlotTitle);
+
+        // 模块3: 思考模式
+        var colThink = new Panel { BackColor = cCard, Padding = new Padding(16), Dock = DockStyle.Fill, Margin = new Padding(6, 0, 0, 0) };
+        _lblThinking.Text = "思考: 极速";
+        _lblThinking.Dock = DockStyle.Fill;
+        _lblThinking.Font = new Font("Microsoft YaHei UI", 11F);
+        _lblThinking.TextAlign = ContentAlignment.MiddleLeft;
+        var lblThinkTitle = new Label { Text = "思考模式", Dock = DockStyle.Top, Height = 28, ForeColor = cTitle, Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft };
+        colThink.Controls.Add(_lblThinking);
+        colThink.Controls.Add(lblThinkTitle);
+
+        sideGrid.Controls.Add(colToken, 0, 0);
+        sideGrid.Controls.Add(colSlot, 1, 0);
+        sideGrid.Controls.Add(colThink, 2, 0);
+        sidePanel.Controls.Add(sideGrid);
+        rightSplit.Panel2.Controls.Add(sidePanel);
+
+        // ════════════ 主布局 ════════════
+        var mainSplit = new SplitContainer
+        {
+            Dock = DockStyle.Fill,
+            Orientation = Orientation.Vertical,
+            SplitterWidth = 4,
+            BackColor = cBg,
+        };
+        mainSplit.Panel1.Controls.Add(leftPanel);
+        mainSplit.Panel2.Controls.Add(rightSplit);
+
+        Controls.Add(mainSplit);
+
+        Shown += (_, _) =>
+        {
+            mainSplit.SplitterDistance = 240;
+            rightSplit.SplitterDistance = Math.Max(rightSplit.Height - 200, 100);
+        };
+
+        // ════════════ 事件接线 ════════════
+        _btnStart = btnStart;
+        _btnStop = btnStop;
+        _btnClearLog = btnClearLog;
+        _btnClearCache = btnClearCache;
+        _lblStatus = lblStatus;
+        _btnExportCfg = btnExport;
+        _btnImportCfg = btnImport;
     }
+
+    /// <summary>创建统一风格按钮。</summary>
+    private static Button MakeBtn(string text, Color bg, Color fg, bool enabled = true, int h = 34) => new()
+    {
+        Text = text,
+        Size = new Size(208, h),
+        FlatStyle = FlatStyle.Flat,
+        BackColor = bg,
+        ForeColor = fg,
+        Enabled = enabled,
+        Font = new Font("Microsoft YaHei UI", 9F),
+    };
+
+    /// <summary>创建统一风格 DataGridView。</summary>
+    private static DataGridView MakeGrid(Color bg, Color fg) => new()
+    {
+        Dock = DockStyle.Fill,
+        ReadOnly = true,
+        AllowUserToAddRows = false,
+        BackgroundColor = bg,
+        ForeColor = fg,
+        GridColor = Color.FromArgb(40, 45, 55),
+        RowHeadersVisible = false,
+        AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+    };
 
     private static DataGridViewTextBoxColumn MakeGridCol(string header) => new()
     {
@@ -291,22 +519,144 @@ public class MainForm : Form
         SortMode = DataGridViewColumnSortMode.NotSortable,
     };
 
-    private static Label MakeLabel(string text) => new Label
+    /// <summary>可编辑 CheckBox 列（槽位管理页：强占/KV缓存开关）。</summary>
+    private static DataGridViewCheckBoxColumn MakeCheckCol(string header) => new()
     {
-        Text = text,
-        AutoSize = true,
-        TextAlign = ContentAlignment.MiddleLeft,
-        Margin = new Padding(0, 7, 8, 7),
+        HeaderText = header,
+        SortMode = DataGridViewColumnSortMode.NotSortable,
+        AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
     };
 
-    private static void AddRow(TableLayoutPanel panel, Control label, Control value, Control? extra)
+    /// <summary>左侧分区标题（主色强调）。</summary>
+    private static Label MakeSectionTitle(string text, Color accent) => new()
     {
-        int row = panel.RowStyles.Count;
+        Text = $"  {text}",
+        Dock = DockStyle.Fill,
+        ForeColor = accent,
+        Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold),
+        TextAlign = ContentAlignment.MiddleLeft,
+        Margin = new Padding(0, 12, 0, 8),
+    };
+
+    /// <summary>构建 Configuration 面板（14 项配置 + 浏览按钮）。字体白色，暗色背景。</summary>
+    private Control BuildConfigPanel(Color cardBg, Color bodyColor)
+    {
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            AutoSize = true,
+            BackColor = Color.Transparent,
+            Margin = new Padding(0, 0, 0, 6),
+        };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+        void AddRow(string label, Control value, Control? extra)
+        {
+            int row = panel.RowStyles.Count;
+            panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            var lbl = new Label
+            {
+                Text = label,
+                AutoSize = true,
+                ForeColor = Color.White,
+                Font = new Font("Microsoft YaHei UI", 9F),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0, 4, 6, 4),
+            };
+            panel.Controls.Add(lbl, 0, row);
+            value.Margin = new Padding(0, 2, 0, 2);
+            panel.Controls.Add(value, 1, row);
+            if (extra != null)
+            {
+                extra.Margin = new Padding(2, 0, 0, 0);
+                panel.Controls.Add(extra, 2, row);
+            }
+        }
+
+        AddRow("exe:", _txtExe, _btnBrowseExe);
+        AddRow("模型:", _txtModel, _btnBrowseModel);
+        AddRow("端口:", _numPort, null);
+        AddRow("ctx:", _numCtx, null);
+        AddRow("ngl:", _numNgl, null);
+        AddRow("parallel:", _numParallel, null);
+        AddRow("kv:", _chkNoKv, null);
+        AddRow("线程:", _numThreads, null);
+        AddRow("附加:", _txtExtra, null);
+        AddRow("休眠(min):", _numIdleMin, null);
+        AddRow("P核掩码:", _txtPcoreMask, null);
+        AddRow("流式:", _chkForceStream, null);
+        AddRow("缓存路径:", _txtKvCachePath, null);
+        AddRow("Token Guard:", _chkTokenGuard, null);
+        AddRow("输出预留:", _numReservedTokens, null);
+        AddRow("输出续接:", _chkContinuation, null);
+        AddRow("最大续接:", _numMaxContinuations, null);
+        AddRow("续接超时:", _numContTimeout, null);
+        AddRow("崩溃恢复:", _chkCrashRecover, null);
+        AddRow("最大重启:", _numMaxRestarts, null);
+        var autoPreFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, BackColor = Color.Transparent };
+        autoPreFlow.Controls.Add(_chkAutoPreDshRule);
+        autoPreFlow.Controls.Add(_chkAutoPreWebui);
+        autoPreFlow.Controls.Add(_chkAutoPreTrae);
+        autoPreFlow.Controls.Add(_chkAutoPreDshAgent);
+        AddRow("自动强占:", autoPreFlow, null);
+        AddRow("模式:", _chkAuto, null);
+
+        _tooltip.SetToolTip(_txtExtra, "原样拼入命令行；含空格的路径需加引号");
+        _tooltip.SetToolTip(_chkForceStream, "把非流式请求改写为 stream=true。仅适用于能解析 SSE 的客户端。");
+        _tooltip.SetToolTip(_txtKvCachePath, "KV Cache 保存目录（--slot-save-path）；多槽时驱逐自动 save，重绑定自动 restore。留空 = 禁用。");
+        _tooltip.SetToolTip(_chkTokenGuard, "代理层预估算 + 裁剪，防上下文超长 400。预算 = ctx ÷ parallel − 输出预留。");
+        _tooltip.SetToolTip(_numReservedTokens, "为模型生成回复保留的 token 数（默认 8192）。");
+        _tooltip.SetToolTip(_chkContinuation, "输出被 max_tokens 截断（finish_reason=length）时自动续写；工具调用/流式分片场景自动隔离不介入。");
+        _tooltip.SetToolTip(_numMaxContinuations, "单次请求最多自动续接轮数（防死循环，默认 10）。");
+        _tooltip.SetToolTip(_numContTimeout, "单轮推理超时秒数，超时返回已生成内容（默认 300）。");
+        _tooltip.SetToolTip(_chkCrashRecover, "检测到 bad_alloc（任务级内存耗尽）时自动恢复：服务端存活→KV 快照接续/全量重放（SSE keep-alive 保活，客户端无感）；进程死亡→自动重启后重放。10 分钟内 ≥3 次崩溃触发熔断停止自动恢复。");
+        _tooltip.SetToolTip(_numMaxRestarts, "进程死亡分支的最大自动重启次数（0 = 禁用自动重启，默认 2）。");
+        _tooltip.SetToolTip(_chkAutoPreDshRule, "勾选后 DSH 规则引擎会话（dsh_rule_*）槽位自动强占：空闲不被 LRU 驱逐，再次提问零 Prefill 开销。");
+        _tooltip.SetToolTip(_chkAutoPreWebui, "勾选后 WebUI 会话（webui_*）槽位自动强占：空闲不被 LRU 驱逐。");
+        _tooltip.SetToolTip(_chkAutoPreTrae, "勾选后 Trae Work（trae_global）槽位自动强占：空闲不被 LRU 驱逐。");
+        _tooltip.SetToolTip(_chkAutoPreDshAgent, "勾选后 DSH 主 Agent（dsh_agent_global）槽位自动强占：空闲不被 LRU 驱逐。注意 parallel=2 时若两槽都被强占，新会话将排队等待（上限 30s）。");
+
+        return panel;
+    }
+
+    /// <summary>构建统计面板（汇总行 + 表格 + 清空按钮）。暗色主题，白色文字。</summary>
+    private Control BuildStatsPanel(Color pageBg, Color cardBg, Color bodyColor, Color primary)
+    {
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            Padding = new Padding(4),
+            BackColor = pageBg,
+        };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        panel.Controls.Add(label, 0, row);
-        panel.Controls.Add(value, 1, row);
-        if (extra != null)
-            panel.Controls.Add(extra, 2, row);
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        panel.Controls.Add(_lblSummary, 0, 0);
+        panel.Controls.Add(_btnClearStats, 1, 0);
+        panel.Controls.Add(_gridStats, 0, 1);
+        panel.SetColumnSpan(_gridStats, 2);
+
+        _gridStats.DefaultCellStyle.BackColor = cardBg;
+        _gridStats.DefaultCellStyle.ForeColor = bodyColor;
+        _gridStats.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(0x1C, 0x20, 0x2B);
+        _gridStats.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(0x22, 0x28, 0x35);
+        _gridStats.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(0x86, 0x90, 0x9C);
+        _gridStats.Columns.AddRange(
+            MakeGridCol("时间"),
+            MakeGridCol("输入tokens"),
+            MakeGridCol("输入速度(t/s)"),
+            MakeGridCol("输出tokens"),
+            MakeGridCol("输出速度(t/s)"),
+            MakeGridCol("命中率"),
+            MakeGridCol("f_sim_best"),
+            MakeGridCol("总耗时(s)"));
+
+        return panel;
     }
 
     // ==================== 配置 <-> UI ====================
@@ -329,6 +679,20 @@ public class MainForm : Form
         _numIdleMin.Value = Math.Clamp(cfg.IdleMinutes, (int)_numIdleMin.Minimum, (int)_numIdleMin.Maximum);
         _txtPcoreMask.Text = cfg.PCoreMask;
         _chkForceStream.Checked = cfg.ForceStream;
+        _txtKvCachePath.Text = cfg.KvCachePath;
+        _chkTokenGuard.Checked = cfg.TokenGuardEnabled;
+        _numReservedTokens.Value = Math.Clamp(cfg.ReservedOutputTokens, (int)_numReservedTokens.Minimum, (int)_numReservedTokens.Maximum);
+        _chkContinuation.Checked = cfg.ContinuationEnabled;
+        _numMaxContinuations.Value = Math.Clamp(cfg.MaxContinuations, (int)_numMaxContinuations.Minimum, (int)_numMaxContinuations.Maximum);
+        _numContTimeout.Value = Math.Clamp(cfg.ContinuationTimeoutSeconds, (int)_numContTimeout.Minimum, (int)_numContTimeout.Maximum);
+        _chkCrashRecover.Checked = cfg.CrashRecoveryEnabled;
+        _numMaxRestarts.Value = Math.Clamp(cfg.MaxAutoRestarts, (int)_numMaxRestarts.Minimum, (int)_numMaxRestarts.Maximum);
+        var autoPreSet = new HashSet<string>(cfg.AutoPreemptiveApps.Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => s.Trim()), StringComparer.OrdinalIgnoreCase);
+        _chkAutoPreDshRule.Checked = autoPreSet.Contains("dsh_rule");
+        _chkAutoPreWebui.Checked = autoPreSet.Contains("webui");
+        _chkAutoPreTrae.Checked = autoPreSet.Contains("trae_global");
+        _chkAutoPreDshAgent.Checked = autoPreSet.Contains("dsh_agent_global");
     }
 
     /// <summary>智能模式下监听器占用前端端口，改端口需重绑，监听中禁止编辑。</summary>
@@ -350,6 +714,20 @@ public class MainForm : Form
         _config.IdleMinutes = (int)_numIdleMin.Value;
         _config.PCoreMask = _txtPcoreMask.Text.Trim();
         _config.ForceStream = _chkForceStream.Checked;
+        _config.KvCachePath = _txtKvCachePath.Text.Trim();
+        _config.TokenGuardEnabled = _chkTokenGuard.Checked;
+        _config.ReservedOutputTokens = (int)_numReservedTokens.Value;
+        _config.ContinuationEnabled = _chkContinuation.Checked;
+        _config.MaxContinuations = (int)_numMaxContinuations.Value;
+        _config.ContinuationTimeoutSeconds = (int)_numContTimeout.Value;
+        _config.CrashRecoveryEnabled = _chkCrashRecover.Checked;
+        _config.MaxAutoRestarts = (int)_numMaxRestarts.Value;
+        var autoPrePrefixes = new List<string>();
+        if (_chkAutoPreDshRule.Checked) autoPrePrefixes.Add("dsh_rule");
+        if (_chkAutoPreWebui.Checked) autoPrePrefixes.Add("webui");
+        if (_chkAutoPreTrae.Checked) autoPrePrefixes.Add("trae_global");
+        if (_chkAutoPreDshAgent.Checked) autoPrePrefixes.Add("dsh_agent_global");
+        _config.AutoPreemptiveApps = string.Join(",", autoPrePrefixes);
     }
 
     /// <summary>自动查找 llama-server.exe：配置路径无效时用搜索结果回填。</summary>
@@ -397,6 +775,7 @@ public class MainForm : Form
             lock (_logQueue) _logQueue.Clear(); // 清空队列，防止残留旧日志追加
             _txtLog.Clear();
         };
+        _btnClearCache.Click += OnClearCacheClick;
         _btnClearStats.Click += (_, _) => _statsParser.Reset();
         _btnExportCfg.Click += OnExportConfigClick;
         _btnImportCfg.Click += OnImportConfigClick;
@@ -418,7 +797,19 @@ public class MainForm : Form
         _numThreads.ValueChanged += OnParamEdited;
         _txtExtra.TextChanged += OnParamEdited;
         _txtPcoreMask.TextChanged += OnParamEdited;
+        _txtKvCachePath.TextChanged += OnParamEdited;
         _chkForceStream.CheckedChanged += OnParamEdited;
+        _chkTokenGuard.CheckedChanged += OnParamEdited;
+        _numReservedTokens.ValueChanged += OnParamEdited;
+        _chkContinuation.CheckedChanged += OnParamEdited;
+        _numMaxContinuations.ValueChanged += OnParamEdited;
+        _numContTimeout.ValueChanged += OnParamEdited;
+        _chkCrashRecover.CheckedChanged += OnParamEdited;
+        _numMaxRestarts.ValueChanged += OnParamEdited;
+        _chkAutoPreDshRule.CheckedChanged += OnParamEdited;
+        _chkAutoPreWebui.CheckedChanged += OnParamEdited;
+        _chkAutoPreTrae.CheckedChanged += OnParamEdited;
+        _chkAutoPreDshAgent.CheckedChanged += OnParamEdited;
         _numIdleMin.ValueChanged += OnIdleEdited;
         _chkAuto.CheckedChanged += OnAutoModeEdited;
 
@@ -517,6 +908,37 @@ public class MainForm : Form
         }
     }
 
+    /// <summary>清空 KV Cache：删除缓存目录下所有 *.bin + erase 全部槽位。</summary>
+    private async void OnClearCacheClick(object? sender, EventArgs e)
+    {
+        var kv = _scheduler.GetKvCache();
+        if (kv == null)
+        {
+            MessageBox.Show(this, "KV Cache 未启用（需要 --parallel > 1 且配置了缓存路径）。\n\n请在配置管理中设置「缓存路径」并把 Parallel 改为 2，然后重新启动。", "提示",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        if (MessageBox.Show(this, "确定清空所有 KV Cache 缓存？\n将删除缓存目录下所有 .bin 文件并擦除全部槽位。", "确认",
+            MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            return;
+
+        _btnClearCache.Enabled = false;
+        try
+        {
+            int deleted = await kv.ClearAllAsync();
+            AppendLog($"KV Cache 已清空：删除 {deleted} 个缓存文件，全部槽位已擦除。");
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"KV Cache 清空失败：{ex.Message}");
+        }
+        finally
+        {
+            _btnClearCache.Enabled = true;
+        }
+    }
+
     /// <summary>调度器状态文本（非 UI 线程）→ 状态栏。</summary>
     private void OnSchedulerStatus(string text)
     {
@@ -549,6 +971,120 @@ public class MainForm : Form
     private void RefreshThinkingLabel()
     {
         UpdateThinkingLabel(SmartScheduler.DetermineInitialThinkingMode(_config.ExtraArgs));
+    }
+
+    /// <summary>槽位绑定变更（非 UI 线程）→ 刷新槽位表格 + 管理表格 + 侧边摘要。</summary>
+    private void RefreshSlotBindings()
+    {
+        if (!IsHandleCreated) return;
+        BeginInvoke(() =>
+        {
+            RefreshSlotGrid();
+            RefreshSlotMgmtGrid();
+        });
+    }
+
+    /// <summary>从调度器获取槽位快照并填充绑定表格 + 管理表格 + 侧边摘要标签。</summary>
+    private void RefreshSlotGrid()
+    {
+        var bindings = _scheduler.GetSlotBindings();
+        if (bindings == null || bindings.Count == 0)
+        {
+            _gridSlots.Rows.Clear();
+            _lblSlotSummary.Text = "槽位: —（未启用多槽）";
+            return;
+        }
+        _gridSlots.Rows.Clear();
+        foreach (var (key, app, slot, lastActive, _, _) in bindings)
+            _gridSlots.Rows.Add(key, app, $"slot {slot}", lastActive.ToString("HH:mm:ss"));
+        _lblSlotSummary.Text = $"槽位: {bindings.Count} 绑定";
+    }
+
+    /// <summary>填充槽位管理表格（强占/KV缓存 CheckBox 可编辑）。</summary>
+    private void RefreshSlotMgmtGrid()
+    {
+        var bindings = _scheduler.GetSlotBindings();
+        if (bindings == null)
+        {
+            _gridSlotMgmt.Rows.Clear();
+            return;
+        }
+        // 行 Key = 亲和 Key，避免整表 Clear 后重复刷新闪烁
+        foreach (var (key, app, slot, lastActive, preemptive, kvCache) in bindings)
+        {
+            int idx = -1;
+            for (int i = 0; i < _gridSlotMgmt.Rows.Count; i++)
+                if (_gridSlotMgmt.Rows[i].Tag?.ToString() == key) { idx = i; break; }
+            if (idx < 0)
+            {
+                idx = _gridSlotMgmt.Rows.Add();
+                _gridSlotMgmt.Rows[idx].Tag = key;
+            }
+            var row = _gridSlotMgmt.Rows[idx];
+            row.Cells[0].Value = key;
+            row.Cells[1].Value = app;
+            row.Cells[2].Value = $"slot {slot}";
+            row.Cells[3].Value = preemptive;
+            row.Cells[4].Value = kvCache;
+            row.Cells[5].Value = lastActive.ToString("HH:mm:ss");
+        }
+    }
+
+    /// <summary>槽位日志事件（非 UI 线程）→ 显示到槽位页 RichTextBox + slot.log 持久化。</summary>
+    private void OnSlotLog(string line)
+    {
+        LogFile.SlotAppend(line); // 文件持久化（独立 slot.log，2MB 轮切）
+        if (!IsHandleCreated) return;
+        BeginInvoke(() => AppendSlotLog(line));
+    }
+
+    /// <summary>追加一行槽位日志到 RichTextBox（带时间戳 + 级别着色），自动滚到底部。字符上限防膨胀。</summary>
+    private void AppendSlotLog(string line)
+    {
+        var entry = $"[{DateTime.Now:HH:mm:ss}] {line}{Environment.NewLine}";
+        _txtSlotLog.AppendText(entry);
+        if (_txtSlotLog.TextLength > 100_000)
+        {
+            _txtSlotLog.SelectionStart = 0;
+            _txtSlotLog.SelectionLength = 50_000;
+            _txtSlotLog.SelectedText = "";
+        }
+        // 着色本行
+        int start = Math.Max(0, _txtSlotLog.TextLength - entry.Length);
+        _txtSlotLog.SelectionStart = start;
+        _txtSlotLog.SelectionLength = entry.Length;
+        _txtSlotLog.SelectionColor = LogFile.Classify(line) switch
+        {
+            LogFile.Level.Warn => Color.Gold,
+            LogFile.Level.Error => Color.Red,
+            _ => Color.LightGreen,
+        };
+        _txtSlotLog.SelectionStart = _txtSlotLog.TextLength;
+        _txtSlotLog.SelectionLength = 0;
+        _txtSlotLog.ScrollToCaret();
+    }
+
+    /// <summary>槽位管理表格 CheckBox 变更 → 回写调度器（SetPreemptive/SetKvCache）。</summary>
+    private void OnSlotMgmtCellChanged(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.ColumnIndex < 3 || e.RowIndex >= _gridSlotMgmt.Rows.Count) return;
+        var row = _gridSlotMgmt.Rows[e.RowIndex];
+        if (row.Tag is not string key) return;
+        switch (e.ColumnIndex)
+        {
+            case 3: // 强占
+                bool preemptive = row.Cells[3].Value is true;
+                row.Cells[3].Value = preemptive;
+                _scheduler.SetSlotPreemptive(key, preemptive);
+                AppendLog($"槽位管理：{key} 强占模式 → {(preemptive ? "开启" : "关闭")}");
+                break;
+            case 4: // KV缓存
+                bool kvCache = row.Cells[4].Value is true;
+                row.Cells[4].Value = kvCache;
+                _scheduler.SetSlotKvCache(key, kvCache);
+                AppendLog($"槽位管理：{key} KV Cache → {(kvCache ? "开启" : "关闭")}");
+                break;
+        }
     }
 
     /// <summary>阶段切换（非 UI 线程）→ 控件启停 + 状态颜色；唤醒 = 新会话，清空统计。</summary>
@@ -633,26 +1169,28 @@ public class MainForm : Form
         row.Cells[7].Value = (s.TotalMs / 1000.0).ToString("F2");
     }
 
-    /// <summary>累计汇总：请求数、总 tokens、平均速度、加权命中率。</summary>
+    /// <summary>累计汇总：请求数、总 tokens、平均速度、加权命中率。同步更新侧边统计标签。</summary>
     private void UpdateSummary()
     {
         var rounds = _statsParser.GetRounds();
         if (rounds.Count == 0)
         {
             _lblSummary.Text = "请求: 0";
+            _lblTokenSummary.Text = "请求: 0";
             return;
         }
         double inTok = rounds.Sum(r => r.PromptTokens);
         double outTok = rounds.Sum(r => r.EvalTokens);
-        // 平均速度按总时长加权（= 总tokens ÷ 总时间），比逐行算术平均更准确
         double inMs = rounds.Sum(r => r.PromptMs);
         double outMs = rounds.Sum(r => r.EvalMs);
         long acc = rounds.Where(r => r.HasDraft).Sum(r => r.DraftAccepted);
         long gen = rounds.Where(r => r.HasDraft).Sum(r => r.DraftGenerated);
-        _lblSummary.Text = $"请求: {rounds.Count} | " +
-            $"输入: {(long)inTok} tokens @ {(inMs > 0 ? inTok / (inMs / 1000.0) : 0):F1} t/s | " +
-            $"输出: {(long)outTok} tokens @ {(outMs > 0 ? outTok / (outMs / 1000.0) : 0):F1} t/s | " +
-            (gen > 0 ? $"命中率: {acc}/{gen} ({acc * 100.0 / gen:F1}%)" : "命中率: —");
+        string summary = $"请求: {rounds.Count} | " +
+            $"输入: {(long)inTok} @ {(inMs > 0 ? inTok / (inMs / 1000.0) : 0):F1} t/s | " +
+            $"输出: {(long)outTok} @ {(outMs > 0 ? outTok / (outMs / 1000.0) : 0):F1} t/s | " +
+            (gen > 0 ? $"命中: {acc}/{gen}" : "");
+        _lblSummary.Text = summary;
+        _lblTokenSummary.Text = summary;
     }
 
     private void ApplyPhase(SmartScheduler.Phase phase)
@@ -668,7 +1206,11 @@ public class MainForm : Form
         {
             _txtExe, _btnBrowseExe, _txtModel, _btnBrowseModel,
             _numPort, _numCtx, _numNgl, _numParallel, _chkNoKv, _numThreads, _txtExtra,
-            _chkAuto, _numIdleMin, _txtPcoreMask, _chkForceStream,
+            _chkAuto, _numIdleMin, _txtPcoreMask, _chkForceStream, _txtKvCachePath,
+            _chkTokenGuard, _numReservedTokens,
+            _chkContinuation, _numMaxContinuations, _numContTimeout,
+            _chkCrashRecover, _numMaxRestarts,
+            _chkAutoPreDshRule, _chkAutoPreWebui, _chkAutoPreTrae, _chkAutoPreDshAgent,
             _btnExportCfg, _btnImportCfg, // 运行中禁止导入/导出，避免改参冲突
         };
         foreach (var c in paramControls)

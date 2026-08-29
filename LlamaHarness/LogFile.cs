@@ -80,6 +80,25 @@ public static class LogFile
         }
     }
 
+    /// <summary>追加一行槽位日志（可来自任意线程）：独立写入 slot.log，超 2MB 轮切。用于绑定/驱逐/KV Cache 事件追溯。</summary>
+    public static void SlotAppend(string line)
+    {
+        lock (_gate)
+        {
+            try
+            {
+                var stamped = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {line}";
+                var path = Path.Combine(AppContext.BaseDirectory, "slot.log");
+                Rotate(path, MaxLogBytes);
+                File.AppendAllText(path, stamped + Environment.NewLine);
+            }
+            catch
+            {
+                // 尽力而为：磁盘满/权限等问题不影响主流程
+            }
+        }
+    }
+
     /// <summary>写主日志 harness.log，超限时轮切为 harness.log.1。</summary>
     private static void AppendMain(string stampedLine)
     {

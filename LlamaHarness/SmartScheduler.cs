@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text;
 
 namespace LlamaHarness;
 
@@ -53,6 +54,10 @@ public sealed class SmartScheduler : IDisposable
     public event Action? StatsReset;
     /// <summary>思考模式状态变更（可能来自任意线程），UI 侧负责 BeginInvoke。参数为当前档位。</summary>
     public event Action<ThinkingLevel>? ThinkingModeChanged;
+    /// <summary>槽位绑定变更（新绑定/驱逐），UI 侧刷新槽位表格。</summary>
+    public event Action? SlotBindingChanged;
+    /// <summary>槽位相关日志（绑定/驱逐/KV Cache 保存恢复，可能来自任意线程）：UI 显示于槽位页 + 持久化 slot.log。</summary>
+    public event Action<string>? SlotLog;
 
     // C-102 运行统计埋点
     private int _wakeCount, _sleepCount, _inflightPeak;
@@ -63,6 +68,23 @@ public sealed class SmartScheduler : IDisposable
 
     /// <summary>当前思考模式档位（线程安全读取）。</summary>
     public ThinkingLevel ThinkingMode { get { lock (_thinkingGate) return _thinkingMode; } }
+
+    /// <summary>多槽亲和绑定管理器（--parallel &gt; 1 时创建；null = 单槽不路由）。</summary>
+    private volatile SlotAffinity? _affinity;
+
+    /// <summary>KV Cache 管理器（--parallel &gt; 1 且 KvCachePath 非空时创建；null = 禁用）。</summary>
+    private volatile KvCacheManager? _kvCache;
+
+    // ==================== KV 全场景复用状态（§4.1/§4.5/§8，多 agent 并发请求共享）====================
+
+    /// <summary>KV 复用状态统一门控（_truncPending / _toolLockedKeys / _prefixHashes 共用）。</summary>
+    private readonly object _kvStateGate = new();
+    /// <summary>截断待续接标记（§4.1）：已 save 断点快照且续接中的 key。续接成功 → 清理过期快照；失败 → 保留供 restore。</summary>
+    private readonly HashSet<string> _truncPending = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Tool 链锁定集合（§4.5）：本层执行过 SetPreemptive(true) 的 key。只解锁集合内的键，不碰用户手动/自动强占。</summary>
+    private readonly HashSet<string> _toolLockedKeys = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>前缀哈希表（§8 可观测）：key → SHA256(最新一轮之前的全部 messages JSON)。比对判定原生 KV 前缀复用 HIT/MISS。</summary>
+    private readonly Dictionary<string, string> _prefixHashes = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>从启动附加参数判定初始思考档位：
     /// enable_thinking:true → XHigh；enable_thinking:false → Off；无该参数 → 默认开启（XHigh）。
@@ -105,6 +127,22 @@ public sealed class SmartScheduler : IDisposable
 
     public Phase CurrentPhase => (Phase)Volatile.Read(ref _phase);
 
+    /// <summary>获取槽位绑定快照（UI 表格刷新用，含应用名/强占/KV缓存配置）。null = 未启用多槽。</summary>
+    public List<(string Key, string App, int Slot, DateTime LastActive, bool Preemptive, bool KvCache)>? GetSlotBindings()
+    {
+        var aff = _affinity;
+        return aff?.Snapshot();
+    }
+
+    /// <summary>设置指定绑定的强占模式（UI 槽位管理页调用）。</summary>
+    public void SetSlotPreemptive(string key, bool value) => _affinity?.SetPreemptive(key, value);
+
+    /// <summary>设置指定绑定的 KV Cache 开关（UI 槽位管理页调用）。</summary>
+    public void SetSlotKvCache(string key, bool value) => _affinity?.SetKvCache(key, value);
+
+    /// <summary>获取 KV Cache 管理器（UI 清空缓存用）。null = 未启用。</summary>
+    public KvCacheManager? GetKvCache() => _kvCache;
+
     public SmartScheduler(AppConfig cfg)
     {
         _cfg = cfg;
@@ -142,6 +180,10 @@ public sealed class SmartScheduler : IDisposable
     private void OnServerOutput(string line)
     {
         Log?.Invoke(line);
+        // bad_alloc 检测：llama.cpp 任务级 OOM（"got exception: bad allocation"）→ 记录观测事件供流中断佐证
+        CrashRecovery.OnBackendLine(line);
+        if (line.Contains("bad allocation", StringComparison.OrdinalIgnoreCase))
+            Log?.Invoke($"⚠ 检测到后端 bad_alloc（任务级内存耗尽），已记录崩溃事件。");
         lock (_recentOutput)
         {
             _recentOutput.Enqueue(line);
@@ -258,9 +300,18 @@ public sealed class SmartScheduler : IDisposable
             // C-103：附加最近日志快照，供外部 Agent 程序远程诊断
             var logs = RecentOutput().Split('\n');
             var logArr = string.Join(",", logs.Select(l => "\"" + JsonEscape(l.TrimEnd('\r')) + "\""));
+            // 槽位亲和绑定快照（--parallel>1 时）
+            var slotsStr = "";
+            var aff = _affinity;
+            if (aff != null)
+            {
+                var items = aff.Snapshot()
+                    .Select(kv => $"\"{JsonEscape(kv.Key)}\":{{\"slot\":{kv.Slot},\"last_active\":\"{kv.LastActive:o}\"}}");
+                slotsStr = $",\"slots\":{{\"count\":{aff.SlotCount},\"bindings\":{{{string.Join(",", items)}}}}}";
+            }
             await WriteJsonAsync(ctx, 200,
                 $"{{\"phase\":\"{(int)CurrentPhase}\",\"inflight\":{Volatile.Read(ref _inflight)},\"backend_port\":{_backendPort}," +
-                $"\"idle_minutes\":{IdleMinutes},\"recent_logs\":[{logArr}]}}");
+                $"\"idle_minutes\":{IdleMinutes}{slotsStr},\"recent_logs\":[{logArr}]}}");
             return;
         }
 
@@ -372,6 +423,20 @@ public sealed class SmartScheduler : IDisposable
             ThinkingModeChanged?.Invoke(baseLevel);
             Log?.Invoke($"思考模式基线：「{LabelOf(baseLevel)}」（{(EffortOf(baseLevel) is var be && be != null ? $"reasoning_effort={be}, " : "")}enable_thinking={(baseLevel == ThinkingLevel.Off ? "false" : "true")}）。");
 
+            // 槽位亲和：--parallel > 1 时启用（单进程多槽共享 KV 池，指纹绑定 + n_slots 路由）
+            _affinity = _cfg.Parallel > 1 ? new SlotAffinity(_cfg.Parallel) : null;
+            if (_affinity != null)
+                Log?.Invoke($"槽位亲和已启用：{_cfg.Parallel} 槽，指纹绑定 + n_slots 路由（绑定表 slot_bindings.json，LRU 驱逐）。");
+            else
+                Log?.Invoke("槽位亲和未启用（--parallel=1，单槽无需路由）。");
+
+            // KV Cache 持久化：--parallel > 1 且 KvCachePath 非空时启用（驱逐 save / 重绑定 restore）
+            _kvCache = (_affinity != null && !string.IsNullOrWhiteSpace(_cfg.KvCachePath))
+                ? new KvCacheManager(_hc, _cfg.KvCachePath, _cfg.Parallel, srvPort)
+                : null;
+            if (_kvCache != null)
+                Log?.Invoke($"KV Cache 持久化已启用：路径 {_cfg.KvCachePath}（驱逐自动 save，重绑定自动 restore）。");
+
             await WaitReadyAsync(srvPort);
 
             Touch();
@@ -446,6 +511,11 @@ public sealed class SmartScheduler : IDisposable
     {
         var req = ctx.Request;
         var uri = new Uri($"http://localhost:{_backendPort}{req.RawUrl}");
+        string path = req.Url?.AbsolutePath ?? "";
+        string? finalBody = null;   // 最终请求体（思考模式/槽位路由/TokenGuard 改写后），供输出续接构造下一轮
+        bool effStreaming = false;  // 有效流式（含 ForceStream 改写）
+        int? routedSlot = null;     // 本次请求亲和路由的槽位号（崩溃恢复快照接续用）
+        string? routedKey = null;   // 本次请求亲和路由的绑定 key（KV 快照文件名）
 
         // 读取完整请求体（非流式检测 / 强制流式改写需要）；GET 无请求体
         byte[]? bodyBytes = null;
@@ -454,6 +524,12 @@ public sealed class SmartScheduler : IDisposable
             using var ms = new MemoryStream();
             await req.InputStream.CopyToAsync(ms);
             bodyBytes = ms.ToArray();
+        }
+
+        // 请求体 dump（应用识别分析用）：每个 POST 请求的原始 body + headers 落盘
+        if (bodyBytes != null && bodyBytes.Length > 0)
+        {
+            DumpRequest(ctx, bodyBytes);
         }
 
         // 非流式请求检测 + 可选强制流式改写（仅 completions/embeddings 推理请求）：
@@ -468,16 +544,17 @@ public sealed class SmartScheduler : IDisposable
             {
                 var body = System.Text.Encoding.UTF8.GetString(bodyBytes);
 
-                // 思考模式拦截（仅 chat/completions）：识别指令 / 注入 reasoning_effort + enable_thinking
+                // 思考模式拦截（仅 chat/completions）：识别指令 / 注入 reasoning_effort + enable_thinking / 校验修正非法档位
                 if (IsChatCompletions(p))
                 {
                     ThinkingLevel lvl, prev;
                     bool changed;
+                    string? effortFix = null;
                     lock (_thinkingGate)
                     {
                         prev = _thinkingMode;
                         lvl = _thinkingMode;
-                        var injected = InjectThinkingMode(body, ref lvl);
+                        var injected = InjectThinkingMode(body, ref lvl, out effortFix);
                         if (injected != null)
                         {
                             body = injected;
@@ -494,6 +571,138 @@ public sealed class SmartScheduler : IDisposable
                     {
                         Log?.Invoke($"思考模式已切换为「{LabelOf(lvl)}」（{(EffortOf(lvl) is var e && e != null ? $"reasoning_effort={e}, " : "")}enable_thinking={(lvl == ThinkingLevel.Off ? "false" : "true")}）。");
                         ThinkingModeChanged?.Invoke(lvl);
+                    }
+                    if (effortFix != null)
+                        Log?.Invoke($"reasoning_effort 参数修正：{effortFix}（模型模板仅支持 low/medium/xhigh）。");
+                }
+
+                // 槽位亲和路由（--parallel>1）：注入 n_slots 固定槽位；槽忙时 llama.cpp 原生排队，不跨槽漂移
+                var aff = _affinity;
+                if (aff != null && p.Contains("completion", StringComparison.OrdinalIgnoreCase))
+                {
+                    // §4.2 自动冻结：应用类型前缀在 AutoPreemptiveApps → 绑定强制强占（暂停 LRU 驱逐）
+                    var autoPre = ParseAutoPreemptivePrefixes();
+                    var (slot, key, isNew, evicted, evictedSlot, evictedKvCache) = aff.GetSlot(req.Headers, autoPre);
+                    routedSlot = slot;
+                    if (key != null) routedKey = key;
+
+                    // §4.5 Tool 链会话锁定：末条消息 role=tool → agent 工具循环进行中 → 锁槽位防驱逐；循环结束自动解锁
+                    if (key != null)
+                    {
+                        bool inToolLoop = DetectToolLoop(body);
+                        bool didLock = false, didUnlock = false;
+                        lock (_kvStateGate)
+                        {
+                            if (inToolLoop)
+                            {
+                                if (!_toolLockedKeys.Contains(key) && !aff.IsPreemptive(key))
+                                {
+                                    aff.SetPreemptive(key, true);
+                                    _toolLockedKeys.Add(key);
+                                    didLock = true;
+                                }
+                            }
+                            else if (_toolLockedKeys.Remove(key))
+                            {
+                                didUnlock = true;
+                            }
+                        }
+                        if (didLock)
+                        {
+                            Log?.Invoke($"[KV-LOCK] Tool 链会话锁定：{key} → slot{slot}（强占，不驱逐）");
+                            SlotLog?.Invoke($"[KV-LOCK] Tool 链会话锁定：{key} → slot{slot}");
+                        }
+                        else if (didUnlock)
+                        {
+                            aff.SetPreemptive(key, false);
+                            Log?.Invoke($"[KV-UNLOCK] Tool 链结束，解除锁定：{key}");
+                            SlotLog?.Invoke($"[KV-UNLOCK] Tool 链结束，解除锁定：{key}");
+                        }
+                    }
+
+                    var kv = _kvCache;
+
+                    // KV Cache：驱逐前 save（仅当被驱逐者的 KvCache=true）
+                    if (evicted != null && evictedSlot >= 0 && kv != null && evictedKvCache)
+                    {
+                        try
+                        {
+                            var saveTask = kv.SaveAsync(evictedSlot, evicted);
+                            var sw = System.Diagnostics.Stopwatch.StartNew();
+                            await saveTask;
+                            Log?.Invoke($"KV Cache 保存：{evicted} → slot{evictedSlot}（{sw.Elapsed.TotalSeconds:F1}s）");
+                            SlotLog?.Invoke($"KV Cache 保存：{evicted} → slot{evictedSlot}（{sw.Elapsed.TotalSeconds:F1}s）");
+                        }
+                        catch (Exception ex)
+                        {
+                            Log?.Invoke($"KV Cache 保存失败：{evicted}（{ex.Message}），降级为全量 prefill。");
+                            SlotLog?.Invoke($"KV Cache 保存失败：{evicted}（{ex.Message}）");
+                        }
+                    }
+                    else if (evicted != null && !evictedKvCache)
+                    {
+                        SlotLog?.Invoke($"驱逐 {evicted}（KV Cache 已关闭，不保存）");
+                    }
+
+                    // KV Cache：重绑定时 restore（key 有缓存文件且为新绑定 → 从磁盘恢复槽位 KV）
+                    if (key != null && isNew && kv != null && kv.HasCache(key))
+                    {
+                        try
+                        {
+                            var sw = System.Diagnostics.Stopwatch.StartNew();
+                            bool ok = await kv.RestoreAsync(slot, key);
+                            if (ok)
+                            {
+                                Log?.Invoke($"[KV-RESTORE] KV Cache 恢复：{key} → slot{slot}（{sw.Elapsed.TotalSeconds:F1}s，跳过全量 prefill）");
+                                SlotLog?.Invoke($"[KV-RESTORE] KV Cache 恢复：{key} → slot{slot}（{sw.Elapsed.TotalSeconds:F1}s）");
+                                // §8：restore 后重建前缀哈希基线（旧哈希对应驱逐前状态，避免下次请求误报 MISS）
+                                lock (_kvStateGate) _prefixHashes.Remove(key);
+                            }
+                            else
+                            {
+                                Log?.Invoke($"KV Cache 恢复失败：{key}（槽位可能忙），降级为全量 prefill。");
+                                SlotLog?.Invoke($"KV Cache 恢复失败：{key}（槽位忙）");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Log?.Invoke($"KV Cache 恢复异常：{key}（{ex.Message}），降级为全量 prefill。");
+                            SlotLog?.Invoke($"KV Cache 恢复异常：{key}（{ex.Message}）");
+                        }
+                    }
+
+                    if (isNew)
+                    {
+                        var evt = $"槽位绑定：{key} → slot{slot}{(evicted != null ? $"（驱逐 {evicted}）" : "")}";
+                        Log?.Invoke(evt);
+                        SlotLog?.Invoke(evt);
+                        SlotBindingChanged?.Invoke();
+                    }
+                    var injected = InjectNSlots(body, slot);
+                    if (injected != null)
+                    {
+                        body = injected;
+                        bodyBytes = System.Text.Encoding.UTF8.GetBytes(body);
+                    }
+                }
+
+                // Token Guard（仅 chat/completions）：预估算 + 裁剪，防 "exceeds context size" 400
+                if (IsChatCompletions(p) && _cfg.TokenGuardEnabled)
+                {
+                    // 多槽均分总容量：每槽有效上下文 = CtxSize ÷ Parallel；再减输出预留
+                    var budget = Math.Max(1024, _cfg.CtxSize / Math.Max(1, _cfg.Parallel) - _cfg.ReservedOutputTokens);
+                    var (ok, newBody, note) = await TokenGuard.GuardAsync(_hc, _backendPort, body, budget);
+                    if (!ok)
+                    {
+                        Log?.Invoke($"Token Guard 拒绝：{note}");
+                        WriteError(ctx, 400, note ?? "上下文超长");
+                        return;
+                    }
+                    if (newBody != null && newBody != body)
+                    {
+                        body = newBody;
+                        bodyBytes = System.Text.Encoding.UTF8.GetBytes(body);
+                        if (note != null) Log?.Invoke(note);
                     }
                 }
 
@@ -519,6 +728,14 @@ public sealed class SmartScheduler : IDisposable
                         WarnNonStreamOnce();
                     }
                 }
+
+                // §8 可观测：前缀哈希 HIT/MISS 判定（原生 KV 前缀复用；TokenGuard 之后按实际下发体计算）
+                if (routedKey != null)
+                    LogPrefixHash(routedKey, body);
+
+                // 记录最终请求体 + 有效流式标记（输出续接用）
+                finalBody = body;
+                effStreaming = streaming || _cfg.ForceStream;
             }
         }
 
@@ -568,7 +785,84 @@ public sealed class SmartScheduler : IDisposable
             outResp.ContentType = string.IsNullOrEmpty(ct) ? "application/octet-stream" : ct!;
             try
             {
-                await resp.Content.CopyToAsync(outResp.OutputStream);
+                bool completed;
+                string accumulated = "";
+                if (IsChatCompletions(path) && finalBody != null)
+                {
+                    // 输出续接 + 崩溃识别：finish_reason=length 自动续接；流中断/5xx bad_alloc → Completed=false
+                    var log2 = (string s) => Log?.Invoke(s);
+
+                    // §4.1 截断断点快照闭包：finish_reason=length 时、续接请求发出前 save 槽位 KV（此时槽位 KV 仍完整）
+                    Func<Task>? onTrunc = null;
+                    var kvForTrunc = _kvCache;
+                    if (kvForTrunc != null && routedSlot is int truncSlot && !string.IsNullOrEmpty(routedKey))
+                    {
+                        var truncKey = routedKey;
+                        onTrunc = async () =>
+                        {
+                            var sw = System.Diagnostics.Stopwatch.StartNew();
+                            await kvForTrunc.SaveAsync(truncSlot, truncKey);
+                            Log?.Invoke($"[KV-SAVE] 截断断点快照：{truncKey} → slot{truncSlot}（{sw.Elapsed.TotalSeconds:F1}s）");
+                            SlotLog?.Invoke($"[KV-SAVE] 截断断点快照：{truncKey} → slot{truncSlot}");
+                            lock (_kvStateGate) _truncPending.Add(truncKey); // 标记「截断待续接」
+                        };
+                    }
+
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        if (effStreaming)
+                            (completed, accumulated) = await OutputContinuer.HandleStreamAsync(_hc, uri, _backendPort, finalBody, resp, outResp, _cfg, log2, onTrunc);
+                        else
+                            (completed, accumulated) = await OutputContinuer.HandleNonStreamAsync(_hc, uri, _backendPort, finalBody, resp, outResp, _cfg, log2, _cfg.CrashRecoveryEnabled);
+                    }
+                    else
+                    {
+                        // 5xx 错误响应：判定是否 bad_alloc 崩溃（恢复启用 → 不转发，交给崩溃恢复）
+                        string errBody = System.Text.Encoding.UTF8.GetString(await resp.Content.ReadAsByteArrayAsync());
+                        bool isBadAlloc = errBody.Contains("bad allocation", StringComparison.OrdinalIgnoreCase)
+                                         || CrashRecovery.WasBadAlloc(TimeSpan.FromSeconds(60));
+                        if (isBadAlloc && _cfg.CrashRecoveryEnabled && effStreaming)
+                        {
+                            completed = false; // 交给 TryCrashRecoverAsync
+                        }
+                        else
+                        {
+                            var bytes = System.Text.Encoding.UTF8.GetBytes(errBody);
+                            outResp.ContentType = "application/json";
+                            outResp.ContentLength64 = bytes.Length;
+                            await outResp.OutputStream.WriteAsync(bytes);
+                            completed = true;
+                        }
+                    }
+                }
+                else
+                {
+                    completed = true;
+                    await resp.Content.CopyToAsync(outResp.OutputStream);
+                }
+
+                // 崩溃恢复：流中断/5xx bad_alloc → keep-alive 保活 + KV 快照接续 / 进程重启全量重放
+                if (!completed && _cfg.CrashRecoveryEnabled && effStreaming && finalBody != null)
+                {
+                    var log2 = (string s) => Log?.Invoke(s);
+                    await TryCrashRecoverAsync(uri, outResp, finalBody, accumulated, routedSlot, routedKey, log2);
+                }
+
+                // §6.3：续接成功 → 清理过期断点快照（槽活 KV 已领先断点，旧快照 restore 会回退状态）；失败则保留供下次 rebinding/崩溃恢复 restore
+                if (completed && routedKey != null)
+                {
+                    bool wasPending;
+                    lock (_kvStateGate) wasPending = _truncPending.Remove(routedKey);
+                    if (wasPending)
+                    {
+                        try
+                        {
+                            _kvCache?.DeleteCache(routedKey);
+                            Log?.Invoke($"[KV-CLEANUP] 续接成功，清理过期断点快照：{routedKey}");
+                        }
+                        catch { /* 清理失败不影响主流程 */ }
+                    }
+                }
             }
             catch (Exception)
             {
@@ -583,6 +877,394 @@ public sealed class SmartScheduler : IDisposable
             }
         }
     }
+
+    // ==================== KV 全场景复用辅助（§4.2/§4.5/§8） ====================
+
+    /// <summary>解析 AutoPreemptiveApps 配置为前缀集合（§4.2 自动冻结）。</summary>
+    private List<string> ParseAutoPreemptivePrefixes()
+    {
+        return _cfg.AutoPreemptiveApps.Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
+    }
+
+    /// <summary>§4.5 Tool 链检测：messages 末条 role=tool → agent 工具循环进行中（框架刚回填 tool_result、等待模型响应）。
+    /// 历史中残留的旧 tool 消息不作为依据（循环结束后历史仍含 tool 消息，全量扫描会永久误锁）。</summary>
+    private static bool DetectToolLoop(string body)
+    {
+        try
+        {
+            var obj = System.Text.Json.Nodes.JsonNode.Parse(body)?.AsObject();
+            var msgs = obj?["messages"] as System.Text.Json.Nodes.JsonArray;
+            if (msgs == null || msgs.Count == 0) return false;
+            return msgs[^1]?["role"]?.GetValue<string>() == "tool";
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>前缀指纹：SHA256(最新一轮之前的全部 messages JSON)。null = 无状态单轮请求（无比对基线）。</summary>
+    private static string? PrefixHash(string body)
+    {
+        try
+        {
+            var obj = System.Text.Json.Nodes.JsonNode.Parse(body)?.AsObject();
+            var msgs = obj?["messages"] as System.Text.Json.Nodes.JsonArray;
+            if (msgs == null || msgs.Count < 2) return null;
+            // 前缀指纹 = 最新一轮之前的全部 messages 序列化拼接（无需克隆，逐元素 ToJsonString）
+            var sb = new StringBuilder();
+            for (int i = 0; i < msgs.Count - 1; i++)
+                sb.Append(msgs[i]?.ToJsonString() ?? "null").Append(',');
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
+            return Convert.ToHexString(bytes);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>§8 可观测：前缀哈希 HIT/MISS 判定。一致 → 原生 KV 前缀复用（增量 prefill）；不一致 → 全量重算。</summary>
+    private void LogPrefixHash(string key, string body)
+    {
+        var hash = PrefixHash(body);
+        if (hash == null) return;
+        lock (_kvStateGate)
+        {
+            if (_prefixHashes.TryGetValue(key, out var prev))
+            {
+                if (prev == hash)
+                    Log?.Invoke($"[KV-HIT] {key}：前缀未变 → 原生 KV 复用（增量 prefill）");
+                else
+                    Log?.Invoke($"[KV-MISS] {key}：前缀变更 → 全量重算");
+            }
+            _prefixHashes[key] = hash;
+        }
+    }
+
+    // ==================== 崩溃自动恢复（bad_alloc） ====================
+
+    /// <summary>
+    /// bad_alloc 崩溃自动恢复管道（三分支）：
+    /// - 分支 A（服务端存活 + 客户端连接可持有）：抢 save 槽位 KV 快照 → SSE keep-alive 保活客户端
+    ///   → 内存余量检查 → 快照接续（restore + 回填已生成部分 + 续接指令）或全量重放（严格预算）→ 输出灌入同一条流（客户端无感）
+    /// - 分支 B（进程死亡）：重启至多 MaxAutoRestarts 次并等就绪 → 严格预算全量重放（无快照）
+    /// - 分支 C（客户端已断开）：不重放；agent 侧重试走现有 KV restore 路径
+    /// 熔断器：10 分钟窗口内 ≥3 次确认崩溃 → 停止自动恢复，醒目报错，等待人工介入。
+    /// </summary>
+    private async Task TryCrashRecoverAsync(
+        Uri uri, HttpListenerResponse outResp, string finalBody, string accumulated,
+        int? routedSlot, string? routedKey, Action<string>? log)
+    {
+        // ── 诊断增强：崩溃瞬间记录系统资源（判定主机 RAM 还是显存打满 → 长期方案：降 ctx / 换 mmap / 加内存）──
+        var m = new SystemMetrics();
+        var (usedGb, totalGb) = m.GetMemory();
+        double freeGb = totalGb - usedGb;
+        int? vramUsedMb = await SystemMetrics.GetVramUsedMbAsync();
+        log?.Invoke($"崩溃恢复触发。崩溃时刻诊断：空闲 RAM {freeGb:F1}/{totalGb:F1} GB，显存 {(vramUsedMb is int v ? $"{v} MB" : "未知")}");
+
+        // ── 熔断器：10 分钟窗口内 ≥3 次确认崩溃 → 停止自动恢复（需人工介入）──
+        CrashRecovery.RecordCrash();
+        if (!CrashRecovery.AllowRecover())
+        {
+            log?.Invoke($"熔断器已跳闸：10 分钟内 {CrashRecovery.ConfirmedCount} 次崩溃 ≥ {CrashRecovery.MaxCrashesInWindow}，停止自动恢复。请加内存 / 降上下文后手动重试。");
+            RaiseStatus("⚠ 崩溃熔断：自动恢复已停止，需人工介入");
+            return;
+        }
+
+        // 分支 C（客户端已断开）由各分支内的探测写判定：立即写一行 keep-alive，写失败 = 客户端已断开 → 不重放。
+
+        if (_server.IsRunning)
+            await RecoverAliveAsync(uri, outResp, finalBody, accumulated, routedSlot, routedKey, freeGb, log);
+        else
+            await RestartAndReplayAsync(uri, outResp, finalBody, log);
+    }
+
+    /// <summary>分支 A：服务端存活 + 客户端连接可持有 → keep-alive 保活 → 抢 save 快照（抢在 release 前）→ 内存余量检查 → 快照接续或全量重放。</summary>
+    private async Task RecoverAliveAsync(
+        Uri uri, HttpListenerResponse outResp, string finalBody, string accumulated,
+        int? routedSlot, string? routedKey, double freeGb, Action<string>? log)
+    {
+        // ── SSE keep-alive（立即启动：从崩溃检测时刻起保活客户端，Trae 看到停顿后继续出字）──
+        var keepAliveCts = new CancellationTokenSource();
+        var writeGate = new SemaphoreSlim(1, 1); // 写门控：keep-alive 与重放管道并发写互斥，防 SSE 行交错
+        Task keepAliveTask = RunKeepAliveAsync(outResp, writeGate, keepAliveCts.Token, log);
+
+        try
+        {
+            // ── 分支 C 探测：客户端已断开 → 不重放（agent 侧重试走现有 KV restore 路径）──
+            if (!await ProbeClientConnectedAsync(outResp, writeGate))
+            {
+                log?.Invoke("客户端已断开：跳过重放（agent 侧重试将走现有 KV restore 路径）。");
+                return;
+            }
+
+            // ── 抢 save 槽位 KV（llama.cpp 崩溃即 release 槽位；抢到 n_saved>0 = 有效快照，否则全量路径）──
+            var kv = _kvCache;
+            bool snapshotOk = false;
+            if (kv != null && routedSlot is int slot && !string.IsNullOrEmpty(routedKey))
+            {
+                try
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    await kv.SaveAsync(slot, routedKey);
+                    int nSaved = kv.SavedTokens(routedKey);
+                    if (nSaved > 0)
+                    {
+                        snapshotOk = true;
+                        log?.Invoke($"崩溃快照抢获：{routedKey} → slot{slot}（{sw.Elapsed.TotalSeconds:F1}s，{nSaved} tokens）");
+                    }
+                    else
+                    {
+                        log?.Invoke("崩溃快照为空（槽位已 release，n_saved=0）：降级全量重放路径。");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    log?.Invoke($"崩溃快照保存失败：{ex.Message}，降级全量重放路径。");
+                }
+            }
+
+            // ── 内存余量检查：空闲 RAM < 4GB → 预算收紧 25%（防同点再崩）──
+            bool tightBudget = freeGb < 4.0;
+            int budget = Math.Max(1024, _cfg.CtxSize / Math.Max(1, _cfg.Parallel) - _cfg.ReservedOutputTokens);
+            if (tightBudget)
+            {
+                budget = Math.Max(1024, (int)(budget * 0.75));
+                log?.Invoke($"内存余量不足（空闲 {freeGb:F1} GB < 4 GB）：重放预算收紧 25% 防再崩。");
+            }
+
+            string? replayBody = null;
+            bool usedSnapshot = false; // 实际走快照接续路径的标志（末行日志准确反映路径）
+
+            // ── 快照接续：restore 快照 + 回填 assistant（已生成部分）+ 续接指令 ──
+            if (snapshotOk && kv != null && routedSlot is int slot2 && !string.IsNullOrEmpty(routedKey))
+            {
+                bool restored = false;
+                try { restored = await kv.RestoreAsync(slot2, routedKey); }
+                catch (Exception ex) { log?.Invoke($"快照 restore 异常：{ex.Message}"); }
+
+                if (restored)
+                {
+                    // accumulated 为空（prefill 阶段崩溃无输出）→ 不构造空 assistant 续接体，原请求直接重放（restore 的 KV 供前缀复用）
+                    string? contBody = string.IsNullOrEmpty(accumulated)
+                        ? null
+                        : OutputContinuer.BuildContinuationBody(finalBody, accumulated);
+                    bool useSnapshot = contBody != null || string.IsNullOrEmpty(accumulated);
+                    if (!useSnapshot)
+                        log?.Invoke("续接体构造失败：降级全量重放路径。");
+
+                    if (useSnapshot)
+                    {
+                        var target = contBody ?? finalBody;
+                        var (ok, guarded, note) = await TokenGuard.GuardAsync(_hc, _backendPort, target, budget);
+                        if (!ok)
+                        {
+                            log?.Invoke($"续接中止：{note}（内存余量不足且上下文无法裁剪）。");
+                            return; // 中止并明确报错（客户端流结束，agent 侧重试走现有机制）
+                        }
+                        if (note != null) log?.Invoke(note);
+                        replayBody = guarded ?? target;
+                        usedSnapshot = true;
+                    }
+                }
+                else
+                {
+                    log?.Invoke("快照 restore 失败（槽位忙？）：降级全量重放路径。");
+                }
+            }
+
+            // ── 全量重放路径（无快照 / restore 失败）：严格预算 TokenGuard 裁剪 + 原请求重发 ──
+            if (replayBody == null)
+            {
+                var (ok, guarded, note) = await TokenGuard.GuardAsync(_hc, _backendPort, finalBody, budget);
+                if (!ok)
+                {
+                    log?.Invoke($"重放中止：{note}（内存余量不足且上下文无法裁剪）。");
+                    return;
+                }
+                if (note != null) log?.Invoke(note);
+                replayBody = guarded ?? finalBody;
+            }
+
+            log?.Invoke(usedSnapshot ? "崩溃快照接续：restore KV + 回填已生成部分 + 续接指令…" : "全量重放：原请求重发（严格预算）…");
+            var (replayCompleted, _) = await OutputContinuer.SendAndPipeStreamAsync(_hc, uri, _backendPort, replayBody, outResp, _cfg, log, writeGate);
+            if (!replayCompleted)
+                log?.Invoke("重放流再次中断（二次崩溃？）：本次恢复失败，agent 侧重试将走现有机制。");
+        }
+        catch (Exception ex)
+        {
+            log?.Invoke($"崩溃恢复异常：{ex.Message}");
+        }
+        finally
+        {
+            keepAliveCts.Cancel();
+            try { await keepAliveTask; } catch { } // 等在途 keep-alive 写入完成再返回（调用方负责关连接）
+        }
+    }
+
+    /// <summary>分支 B：进程死亡 → 重启至多 MaxAutoRestarts 次并等就绪 → 严格预算全量重放（无快照，防同点再崩）。</summary>
+    private async Task RestartAndReplayAsync(Uri uri, HttpListenerResponse outResp, string finalBody, Action<string>? log)
+    {
+        var keepAliveCts = new CancellationTokenSource();
+        var writeGate = new SemaphoreSlim(1, 1);
+        Task keepAliveTask = RunKeepAliveAsync(outResp, writeGate, keepAliveCts.Token, log);
+        try
+        {
+            // ── 分支 C 探测：客户端已断开 → 不重放（agent 侧重试走现有 KV restore 路径）──
+            if (!await ProbeClientConnectedAsync(outResp, writeGate))
+            {
+                log?.Invoke("客户端已断开：跳过重放（agent 侧重试将走现有 KV restore 路径）。");
+                return;
+            }
+
+            int maxRestarts = Math.Max(0, _cfg.MaxAutoRestarts);
+            if (maxRestarts == 0)
+            {
+                log?.Invoke("进程已死且 MaxAutoRestarts=0（自动重启禁用）：无法自动恢复，请手动启动。");
+                return;
+            }
+
+            bool restarted = false;
+            for (int attempt = 1; attempt <= maxRestarts && !restarted; attempt++)
+            {
+                log?.Invoke($"崩溃恢复：重启 llama-server（{attempt}/{maxRestarts}）…");
+                RaiseStatus($"崩溃恢复：正在重启后端服务（{attempt}/{maxRestarts}）…");
+                try
+                {
+                    await EnsureRunningAsync();
+                    restarted = true;
+                }
+                catch (Exception ex)
+                {
+                    log?.Invoke($"重启失败（{attempt}/{maxRestarts}）：{ex.Message}");
+                }
+            }
+
+            if (!restarted)
+            {
+                log?.Invoke("全部重启失败：无法自动恢复，请手动启动。");
+                return;
+            }
+
+            // 重启后后端端口可能变化（自动探测空闲端口），重建 URI
+            var replayUri = new Uri($"http://localhost:{_backendPort}{uri.AbsolutePath}{uri.Query}");
+
+            // 严格预算全量重放（无快照）：重启后内存状态未知，统一收紧 25% 防同点再崩
+            int budget = Math.Max(1024, _cfg.CtxSize / Math.Max(1, _cfg.Parallel) - _cfg.ReservedOutputTokens);
+            budget = Math.Max(1024, (int)(budget * 0.75));
+            var (ok, guarded, note) = await TokenGuard.GuardAsync(_hc, _backendPort, finalBody, budget);
+            if (!ok)
+            {
+                log?.Invoke($"重放中止：{note}（上下文无法裁剪到严格预算）。");
+                return;
+            }
+            if (note != null) log?.Invoke(note);
+
+            log?.Invoke("全量重放：原请求重发（严格预算，无快照）…");
+            var (replayCompleted, _) = await OutputContinuer.SendAndPipeStreamAsync(_hc, replayUri, _backendPort, guarded ?? finalBody, outResp, _cfg, log, writeGate);
+            if (!replayCompleted)
+                log?.Invoke("重放流再次中断：本次恢复失败。");
+        }
+        catch (Exception ex)
+        {
+            log?.Invoke($"崩溃恢复异常：{ex.Message}");
+        }
+        finally
+        {
+            keepAliveCts.Cancel();
+            try { await keepAliveTask; } catch { }
+        }
+    }
+
+    /// <summary>探测客户端连接是否存活：立即写一行 keep-alive 注释；写失败 = 客户端已断开（分支 C）。</summary>
+    private static async Task<bool> ProbeClientConnectedAsync(HttpListenerResponse outResp, SemaphoreSlim writeGate)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(": keepalive\n");
+        await writeGate.WaitAsync();
+        try
+        {
+            await outResp.OutputStream.WriteAsync(bytes);
+            await outResp.OutputStream.FlushAsync();
+            return true;
+        }
+        catch
+        {
+            return false; // 写入失败 = 客户端已断开
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    /// <summary>SSE keep-alive：每 N 秒写一行注释（客户端忽略但连接不断），直到取消或客户端断开。</summary>
+    private async Task RunKeepAliveAsync(HttpListenerResponse outResp, SemaphoreSlim writeGate, CancellationToken ct, Action<string>? log)
+    {
+        var intervalSec = Math.Max(1, _cfg.RecoveryKeepAliveIntervalSeconds);
+        var bytes = System.Text.Encoding.UTF8.GetBytes(": keepalive\n");
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(intervalSec), ct);
+                await writeGate.WaitAsync(ct);
+                try
+                {
+                    await outResp.OutputStream.WriteAsync(bytes);
+                    await outResp.OutputStream.FlushAsync();
+                }
+                finally
+                {
+                    writeGate.Release();
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 正常停止（恢复流程完成）
+        }
+        catch (Exception ex)
+        {
+            log?.Invoke($"keep-alive 停止：{ex.Message}");
+        }
+    }
+
+    /// <summary>请求体 dump（应用识别分析用）：原始 body + headers 落盘到 request_dump.log。</summary>
+    private void DumpRequest(HttpListenerContext ctx, byte[] bodyBytes)
+    {
+        try
+        {
+            var req = ctx.Request;
+            var ts = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+            var path = req.Url?.AbsolutePath ?? "";
+            var bodyStr = System.Text.Encoding.UTF8.GetString(bodyBytes);
+
+            var headers = new StringBuilder();
+            foreach (var key in req.Headers.AllKeys)
+            {
+                headers.AppendLine($"{key}: {req.Headers[key]}");
+            }
+
+            // 请求体截断：超过 2000 字符只保留前 2000（避免日志爆炸，system prompt 通常在前部）
+            if (bodyStr.Length > 2000)
+                bodyStr = bodyStr.Substring(0, 2000) + $"...(truncated, total {System.Text.Encoding.UTF8.GetByteCount(bodyStr)} bytes)";
+
+            var dumpLine = $"[{ts}] POST {path}\n--- Headers ---\n{headers}--- Body ---\n{bodyStr}\n{new string('=', 80)}\n\n";
+            lock (_dumpLock)
+            {
+                using var sw = new StreamWriter(new FileStream(
+                    System.IO.Path.Combine(AppContext.BaseDirectory, "request_dump.log"),
+                    FileMode.Append, FileAccess.Write));
+                sw.Write(dumpLine);
+            }
+        }
+        catch { /* dump 失败不影响主流程 */ }
+    }
+
+    private static readonly object _dumpLock = new();
 
     /// <summary>判断是否为真实推理请求（刷新闲置计时）：POST + completions/embeddings 路径。</summary>
     private static bool IsInferenceRequest(HttpListenerRequest req)
@@ -646,22 +1328,24 @@ public sealed class SmartScheduler : IDisposable
     ///    - 「开启轻度推理模式」→ Low；「开启中度推理模式」→ Medium；「开启深度推理模式」→ XHigh。
     ///    命中 → 设置全局档位，剥离指令文本（避免模型把指令当问题回答）。
     /// 2. 普通请求：Off → 不注入（沿用服务端启动参数）；Low/Medium/XHigh → 注入对应 reasoning_effort + enable_thinking=true。
+    /// 3. 校验修正：客户端可能发送模板不支持的 reasoning_effort（如 high/veryhigh），自动映射为 low/medium/xhigh。
     /// DOM 解析失败时透传原始请求（返回 null）。
     /// </summary>
     /// <param name="json">请求体 JSON</param>
     /// <param name="level">当前全局思考档位（ref：指令命中时更新）</param>
+    /// <param name="effortFix">reasoning_effort 修正描述（如 "high → xhigh"）；null = 无需修正</param>
     /// <returns>改写后的 JSON；null = 无需改写或解析失败，调用方透传。</returns>
-    public static string? InjectThinkingMode(string json, ref ThinkingLevel level)
+    public static string? InjectThinkingMode(string json, ref ThinkingLevel level, out string? effortFix)
     {
-        // 快速路径：Off 态且无指令文本 → 不注入也不识别，无需解析
-        if (level == ThinkingLevel.Off && !ContainsAnyInstruction(json))
+        effortFix = null;
+        // 快速路径：Off 态且无指令文本且无 reasoning_effort → 不注入也不识别，无需解析
+        if (level == ThinkingLevel.Off && !ContainsAnyInstruction(json) && !json.Contains("reasoning_effort"))
             return null;
         try
         {
             var node = System.Text.Json.Nodes.JsonNode.Parse(json);
             if (node is not System.Text.Json.Nodes.JsonObject obj) return null;
 
-            // 1. 检测末条 user 消息中的思考/推理指令
             bool hit = false;
             if (obj["messages"] is System.Text.Json.Nodes.JsonArray msgs && msgs.Count > 0)
             {
@@ -721,7 +1405,24 @@ public sealed class SmartScheduler : IDisposable
                 ctk["enable_thinking"] = true;
             }
 
-            return hit || level != ThinkingLevel.Off ? obj.ToJsonString() : null;
+            // 3. 校验修正：客户端可能发送模板不支持的 reasoning_effort（high/veryhigh/minimal/off...）
+            bool effortFixed = false;
+            if (obj["chat_template_kwargs"] is System.Text.Json.Nodes.JsonObject ctk2
+                && ctk2["reasoning_effort"] != null)
+            {
+                string effStr = "";
+                try { effStr = ctk2["reasoning_effort"]!.GetValue<string>(); } catch { /* 非字符串值：跳过 */ }
+                var fix = NormalizeReasoningEffort(effStr);
+                if (fix != null)
+                {
+                    if (string.IsNullOrEmpty(fix)) ctk2.Remove("reasoning_effort"); // off/none/false → 移除字段
+                    else ctk2["reasoning_effort"] = fix;
+                    effortFix = $"{effStr} → {(string.IsNullOrEmpty(fix) ? "已移除" : fix)}";
+                    effortFixed = true;
+                }
+            }
+
+            return hit || level != ThinkingLevel.Off || effortFixed ? obj.ToJsonString() : null;
         }
         catch
         {
@@ -730,11 +1431,47 @@ public sealed class SmartScheduler : IDisposable
         }
     }
 
+    /// <summary>
+    /// 校验 reasoning_effort：模型模板仅支持 low/medium/xhigh。
+    /// 合法值返回 null（无需修正）；非法值返回修正后的值，空串 = 应移除字段。
+    /// </summary>
+    public static string? NormalizeReasoningEffort(string effort)
+    {
+        var v = effort.Trim().ToLowerInvariant();
+        return v switch
+        {
+            "low" or "medium" or "xhigh" => null,          // 合法，不动
+            "high" or "veryhigh" or "very_high" or "deep"
+                or "max" or "extreme" => "xhigh",           // 高深度类 → xhigh
+            "minimal" or "small" or "tiny" => "low",        // 低深度类 → low
+            "off" or "none" or "false" or "" => "",          // 关闭意图 → 移除字段
+            _ => "medium",                                  // 未知值 → 安全中档
+        };
+    }
+
     /// <summary>是否含任一思考/推理指令文本（快速路径判断用）。</summary>
     private static bool ContainsAnyInstruction(string json) =>
         json.Contains("开启思考模式") || json.Contains("关闭思考模式")
         || json.Contains("开启轻度推理模式") || json.Contains("开启中度推理模式")
         || json.Contains("开启深度推理模式");
+
+    /// <summary>注入 n_slots 固定槽位路由（llama.cpp 多槽特性）。失败返回 null，调用方透传。</summary>
+    public static string? InjectNSlots(string json, int slot)
+    {
+        try
+        {
+            var node = System.Text.Json.Nodes.JsonNode.Parse(json);
+            if (node is not System.Text.Json.Nodes.JsonObject obj) return null;
+            // 已有 n_slots 时不覆盖（尊重客户端显式指定）
+            if (obj["n_slots"] != null) return null;
+            obj["n_slots"] = new System.Text.Json.Nodes.JsonArray(slot);
+            return obj.ToJsonString();
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     // ==================== 闲置休眠（15 分钟无请求自动释放） ====================
 

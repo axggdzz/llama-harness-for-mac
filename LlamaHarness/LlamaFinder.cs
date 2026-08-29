@@ -77,6 +77,12 @@ public static class LlamaFinder
         sb.Append($" -c {cfg.CtxSize}");
         sb.Append($" -ngl {cfg.Ngl}");
         sb.Append($" --parallel {cfg.Parallel}");
+        // KV Cache 持久化：多槽 + 配置了缓存路径时，启用 /slots 端点 + 指定保存目录
+        if (cfg.Parallel > 1 && !string.IsNullOrWhiteSpace(cfg.KvCachePath))
+        {
+            sb.Append(" --slots");
+            sb.Append($" --slot-save-path {cfg.KvCachePath.Trim()}");
+        }
         if (cfg.NoKvUnified)
             sb.Append(" --no-kv-unified");
         int threads = threadsOverride ?? cfg.Threads;

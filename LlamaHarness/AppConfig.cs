@@ -30,6 +30,26 @@ public class AppConfig
     // 强制流式：把非流式推理请求改写为 stream=true（SSE 直通），防客户端读超时→断开→全量重填。
     // 仅适用于能解析 SSE 流的客户端；标准 OpenAI SDK 客户端勿开。
     public bool ForceStream { get; set; } = false;
+    /// <summary>KV Cache 保存路径（--slot-save-path）：留空 = 禁用 KV 缓存持久化。驱逐时自动 save，重绑定时自动 restore。</summary>
+    public string KvCachePath { get; set; } = "g:/temp";
+    /// <summary>Token Guard 总开关：代理层预估算 + 裁剪，防上下文超长 400 错误。</summary>
+    public bool TokenGuardEnabled { get; set; } = true;
+    /// <summary>输出预留 token（为模型生成回复保留）：预算 = CtxSize ÷ Parallel − 此值。</summary>
+    public int ReservedOutputTokens { get; set; } = 8192;
+    /// <summary>输出续接总开关：输出被 max_tokens 截断（finish_reason=length）时自动续接。</summary>
+    public bool ContinuationEnabled { get; set; } = true;
+    /// <summary>最大续接迭代次数（防死循环）。</summary>
+    public int MaxContinuations { get; set; } = 10;
+    /// <summary>单轮推理超时（秒）：超时返回已生成内容。</summary>
+    public int ContinuationTimeoutSeconds { get; set; } = 300;
+    /// <summary>bad_alloc 崩溃自动恢复总开关：流中断/5xx 检测到 bad_alloc 时自动快照接续或全量重放。</summary>
+    public bool CrashRecoveryEnabled { get; set; } = true;
+    /// <summary>进程死亡分支的最大自动重启次数（防无限重启循环）。</summary>
+    public int MaxAutoRestarts { get; set; } = 2;
+    /// <summary>恢复期间 SSE keep-alive 注释行间隔（秒）：保活客户端连接，Trae 无感续接。</summary>
+    public int RecoveryKeepAliveIntervalSeconds { get; set; } = 5;
+    /// <summary>自动强占（冻结防驱逐）的应用类型前缀，逗号分隔。key 匹配任一前缀 → 槽位不可被 LRU 驱逐（§4.2）。默认持久 Agent 会话类。</summary>
+    public string AutoPreemptiveApps { get; set; } = "dsh_agent_global,trae_global";
 
     private static string ConfigPath => Path.Combine(AppContext.BaseDirectory, "config.json");
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
@@ -54,6 +74,11 @@ public class AppConfig
             if (cfg.Parallel <= 0) cfg.Parallel = 1;
             if (cfg.Threads <= 0) cfg.Threads = Environment.ProcessorCount;
             if (cfg.IdleMinutes <= 0) cfg.IdleMinutes = 15;
+            if (cfg.ReservedOutputTokens <= 0) cfg.ReservedOutputTokens = 8192;
+            if (cfg.MaxContinuations < 1) cfg.MaxContinuations = 10;
+            if (cfg.ContinuationTimeoutSeconds < 30) cfg.ContinuationTimeoutSeconds = 300;
+            if (cfg.MaxAutoRestarts < 0) cfg.MaxAutoRestarts = 2; // 0 = 禁用进程死亡分支的自动重启
+            if (cfg.RecoveryKeepAliveIntervalSeconds < 1) cfg.RecoveryKeepAliveIntervalSeconds = 5;
             return cfg;
         }
         catch (Exception ex)
