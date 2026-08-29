@@ -81,7 +81,7 @@ public static class LlamaFinder
         if (cfg.Parallel > 1 && !string.IsNullOrWhiteSpace(cfg.KvCachePath))
         {
             sb.Append(" --slots");
-            sb.Append($" --slot-save-path {cfg.KvCachePath.Trim()}");
+            sb.Append($" --slot-save-path \"{cfg.KvCachePath.Trim()}\""); // 引号包裹：路径含空格（如 "C:\temp cache"）不致断裂
         }
         if (cfg.NoKvUnified)
             sb.Append(" --no-kv-unified");

@@ -59,7 +59,8 @@ public sealed class LlamaStatsParser
     // draft acceptance 兼容 "= 0.65 52 accepted / 80 generated"（旧）与 "= 0.75 (30 accepted / 40 generated)"（新）
     private static readonly Regex DraftRe = new(@"draft acceptance\s*=\s*[\d.]*\s*\(?\s*(\d+)\s*accepted\s*/\s*(\d+)\s*generated");
     // f_sim_best 为定制构建字段：取其后第一个数值，位置不敏感（单独成行或嵌在其他行均可）
-    private static readonly Regex FSimBestRe = new(@"f_sim_best\D*?(-?\d+(?:\.\d+)?)");
+    // [^\d\r\n]*? 只跳过数字与换行之外的字符，防 "f_sim_best (3 samples) 0.85" 误取括号内计数
+    private static readonly Regex FSimBestRe = new(@"f_sim_best[^\d\r\n]*?(-?\d+(?:\.\d+)?)");
 
     /// <summary>喂入一行进程输出；print_timing 块更新对应轮次，槽位选择行暂存 f_sim_best。</summary>
     public void Feed(string line)

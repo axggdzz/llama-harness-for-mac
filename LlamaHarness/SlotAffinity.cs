@@ -131,7 +131,7 @@ public sealed class SlotAffinity
                         if (slot >= 0) break;
                         // 检查是否有非强占绑定被释放（理论上不会，但安全起见）
                         var retry = _bindings.Where(kv => !kv.Value.Preemptive).OrderBy(kv => kv.Value.LastActive).FirstOrDefault();
-                        if (retry.Key != "")
+                        if (retry.Key != null)
                         {
                             slot = retry.Value.Slot;
                             evictedSlot = slot;

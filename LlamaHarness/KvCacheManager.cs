@@ -289,6 +289,6 @@ public sealed class KvCacheManager
     private static string Sanitize(string key)
     {
         var invalid = Path.GetInvalidFileNameChars();
-        return key.Where(c => !invalid.Contains(c) && c != '/' && c != '\\').ToString();
+        return new string(key.Where(c => !invalid.Contains(c) && c != '/' && c != '\\').ToArray());
     }
 }
