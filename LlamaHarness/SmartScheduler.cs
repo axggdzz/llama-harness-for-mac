@@ -90,6 +90,15 @@ public sealed class SmartScheduler : IDisposable
     /// <summary>当前思考模式档位（线程安全读取）。</summary>
     public ThinkingLevel ThinkingMode { get { lock (_thinkingGate) return _thinkingMode; } }
 
+    /// <summary>程序化设置思考模式档位（UI 按钮调用）：线程安全，触发 ThinkingModeChanged + 日志。
+    /// 与聊天指令切换同属运行态开关——不跨会话携带，唤醒时按启动参数重置基线。</summary>
+    public void SetThinkingMode(ThinkingLevel level)
+    {
+        lock (_thinkingGate) { _thinkingMode = level; }
+        Log?.Invoke($"思考模式已切换为「{LabelOf(level)}」（{(EffortOf(level) is var e && e != null ? $"reasoning_effort={e}, " : "")}enable_thinking={(level == ThinkingLevel.Off ? "false" : "true")}）。");
+        ThinkingModeChanged?.Invoke(level);
+    }
+
     /// <summary>多槽亲和绑定管理器（--parallel &gt; 1 时创建；null = 单槽不路由）。</summary>
     private volatile SlotAffinity? _affinity;
 
