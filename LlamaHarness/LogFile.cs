@@ -46,14 +46,20 @@ public static class LogFile
     private static readonly System.Text.RegularExpressions.Regex WarnKeywordRe =
         new(@"\b(warning|warn)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
 
+    /// <summary>llama.cpp 已知良性噪声（3.3 日志标准化）：剪枝/合并模型残留的 unused tensor 警告——不进告警流，仅写主日志。</summary>
+    private static readonly System.Text.RegularExpressions.Regex UnusedTensorRe =
+        new(@"model has unused tensor blk\.\d+", System.Text.RegularExpressions.RegexOptions.Compiled);
+
     public enum Level { Info, Warn, Error }
 
     /// <summary>日志级别分类（中英双语）：
+    /// 0. 已知良性噪声（unused tensor）→ Info（不写 warn_error.log）；
     /// 1. 中文关键字（错误/失败/异常 → Error，警告 → Warn）；
     /// 2. llama-server I/W/E 严重度标记；
     /// 3. 英文关键字兜底（error/fatal/critical/exception/failed → Error，warning/warn → Warn）。</summary>
     public static Level Classify(string line)
     {
+        if (UnusedTensorRe.IsMatch(line)) return Level.Info; // 3.3：良性警告降级，防误告警
         if (line.Contains("错误") || line.Contains("失败") || line.Contains("异常")) return Level.Error;
         if (line.Contains("警告")) return Level.Warn;
         var m = SeverityRe.Match(line);
