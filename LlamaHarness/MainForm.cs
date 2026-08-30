@@ -893,27 +893,27 @@ public class MainForm : Form
         var titleBlock = new Panel
         {
             Dock = DockStyle.Top,
-            Height = 90,
+            Height = 150,
             BackColor = C_Bg,
             Padding = new Padding(16, 10, 16, 6),
         };
         var lblTitle = new Label
         {
-            Text = "Llama Harness 智能代理网关\n双槽 KV 复用 · 思考模式拦截",
-            Font = new Font("Microsoft YaHei UI", 15F, FontStyle.Bold),
+            Text = "Llama.cpp Harness-面向工程Llama.cpp智能助手\n本地部署大模型，资源治理大于模型能力!",
+            Font = new Font("Microsoft YaHei UI", 24F, FontStyle.Bold),
             ForeColor = C_Primary,
             AutoSize = true,
             Dock = DockStyle.Left,
-            Margin = new Padding(0, 4, 16, 0),
+            Margin = new Padding(10, 4, 16, 10),
         };
         var lblHint = new Label
         {
-            Text = "思考模式运行中可实时切换\n槽位亲和自动路由 · KV 快照自愈",
+            Text = "槽位亲和 ·自动路由 · KV 快照自愈\n动态锁定 · 实时监控 · 告警机制",
             Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold),
             ForeColor = C_Primary,
             TextAlign = ContentAlignment.MiddleRight,
             Dock = DockStyle.Fill,
-            Margin = new Padding(0, 8, 0, 0),
+            Margin = new Padding(10, 8, 8, 10),
         };
         titleBlock.Controls.Add(lblHint); // 先添加（Fill 后布局，占 Left 之外的剩余空间）
         titleBlock.Controls.Add(lblTitle);
