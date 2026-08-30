@@ -4,7 +4,7 @@ namespace LlamaHarness;
 
 /// <summary>
 /// 应用配置模型。默认值为实测黄金底参：
-/// ctx=262144 / ngl=999 / parallel=1 / no-kv-unified 开启。
+/// ctx=65536 / ngl=999 / parallel=1 / kv-unified 开启（20G 显存内 KV 完整驻留，防 page-fault）。
 /// 持久化为程序目录下的 config.json。
 /// </summary>
 public class AppConfig
@@ -16,11 +16,29 @@ public class AppConfig
     public string ExePath { get; set; } = "";
     public string ModelPath { get; set; } = "";
     public int Port { get; set; } = 8080;
-    public int CtxSize { get; set; } = 262144;   // -c 上下文长度（黄金底参）
+    public int CtxSize { get; set; } = 65536;   // -c 上下文长度（20G 显存红线内；阶段二验证后可上调至 131072）
     public int Ngl { get; set; } = 999;          // -ngl GPU 层数（黄金底参）
     public int Parallel { get; set; } = 1;       // --parallel 并发序列（黄金底参）
-    public bool NoKvUnified { get; set; } = true;// --no-kv-unified（黄金底参）
+    public bool NoKvUnified { get; set; } = false;// --no-kv-unified：false = kv-unified 开启（K/V 连续存储，长上下文收益明确）
     public int Threads { get; set; } = Environment.ProcessorCount; // -t 线程数
+    /// <summary>模型加载模式（--load-mode）：mlock = 全量加载 + 物理内存锁定，无页交换。</summary>
+    public string LoadMode { get; set; } = "mlock";
+    /// <summary>Prefill 微批大小（--ubatch-size）：提升 prefill 单步并行度；阶段二调优 2048→4096，不得超过 BatchSize。</summary>
+    public int UbatchSize { get; set; } = 2048;
+    /// <summary>Prompt 处理批量上限（--batch-size）：不得低于 ubatch 的 2 倍。</summary>
+    public int BatchSize { get; set; } = 8192;
+    /// <summary>KV 缓存量化（--cache-type-k/v）：q4_0 / q8_0 / f16；阶段二切 q8_0 前必须核算显存。</summary>
+    public string CacheTypeKv { get; set; } = "q4_0";
+    /// <summary>Flash Attention 开关（--flash-attn on）：prefill 速度核心开关，必开。</summary>
+    public bool FlashAttn { get; set; } = true;
+    /// <summary>投机解码类型（--spec-type）：draft-mtp = MTP draft 模型，decode 提速 2~3 倍。</summary>
+    public string SpecType { get; set; } = "draft-mtp";
+    /// <summary>每轮投机 draft token 数（--spec-draft-n-max）：0 = 不拼接该参数。</summary>
+    public int SpecDraftNMax { get; set; } = 2;
+    /// <summary>请求级 KV 前缀复用底层开关（--cache-req）：显式开启防默认变更；关闭后 restore 完全失效。</summary>
+    public bool CacheReq { get; set; } = true;
+    /// <summary>batch 阶段 CPU 线程数（--tb）：prefill 分词/调度辅助加速；0 = 不拼接。</summary>
+    public int BatchThreads { get; set; } = 0;
     /// <summary>附加参数：原样拼入命令行（不做再解析）；含空格的路径需自行加引号，如 --mmproj "D:\a b\projector.gguf"。</summary>
     public string ExtraArgs { get; set; } = "";
     public bool AutoMode { get; set; } = true;       // 智能按需模式：代理监听 8080 + 按需唤醒 + 闲置休眠
@@ -110,10 +128,14 @@ public class AppConfig
 
             // 数值兜底：越界时回退黄金默认值
             if (cfg.Port is < 1 or > 65534) cfg.Port = 8080; // 上限 65534：智能模式后端端口 = Port+1，65535 会与前端端口冲突
-            if (cfg.CtxSize <= 0) cfg.CtxSize = 262144;
+            if (cfg.CtxSize <= 0) cfg.CtxSize = 65536;
             if (cfg.Ngl < 0) cfg.Ngl = 999;
             if (cfg.Parallel <= 0) cfg.Parallel = 1;
             if (cfg.Threads <= 0) cfg.Threads = Environment.ProcessorCount;
+            if (cfg.UbatchSize <= 0) cfg.UbatchSize = 2048;
+            if (cfg.BatchSize <= 0) cfg.BatchSize = 8192;
+            if (cfg.SpecDraftNMax < 0) cfg.SpecDraftNMax = 2; // 0 = 用户显式禁用，不兜底
+            if (cfg.BatchThreads < 0) cfg.BatchThreads = 0;   // 0 = 不拼 --tb
             if (cfg.IdleMinutes <= 0) cfg.IdleMinutes = 15;
             if (cfg.ReservedOutputTokens <= 0) cfg.ReservedOutputTokens = 8192;
             if (cfg.MaxContinuations < 1) cfg.MaxContinuations = 10;

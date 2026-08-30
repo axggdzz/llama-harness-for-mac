@@ -64,7 +64,9 @@ public static class LlamaFinder
 
     /// <summary>
     /// 拼接 llama-server 完整命令行参数。
-    /// 模板：-m &lt;model&gt; --port &lt;p&gt; -c &lt;c&gt; -ngl &lt;n&gt; --parallel &lt;np&gt; [--no-kv-unified] -t &lt;t&gt; [附加参数]
+    /// 模板：-m &lt;model&gt; --port &lt;p&gt; -c &lt;c&gt; -ngl &lt;n&gt; --parallel &lt;np&gt; [--no-kv-unified] -t &lt;t&gt;
+    ///       [--load-mode] [--ubatch-size] [--batch-size] [--cache-type-k/v] [--flash-attn on]
+    ///       [--spec-type ... --spec-draft-n-max N] [--cache-req] [--tb N] [附加参数]
     /// portOverride 用于智能模式下后端端口（前端端口 + 1）；
     /// threadsOverride 用于 P 核掩码生效时钳制线程数（防超订）。
     /// 附加参数原样拼入（不做再解析），含空格的值需用户自行加引号，见 AppConfig.ExtraArgs。
@@ -88,6 +90,27 @@ public static class LlamaFinder
         int threads = threadsOverride ?? cfg.Threads;
         if (threads > 0)
             sb.Append($" -t {threads}");
+        // Prefill 吞吐参数（结构化：阶段二调参只改 config 值，代码零改动）
+        if (!string.IsNullOrWhiteSpace(cfg.LoadMode))
+            sb.Append($" --load-mode {cfg.LoadMode.Trim()}");
+        if (cfg.UbatchSize > 0)
+            sb.Append($" --ubatch-size {cfg.UbatchSize}");
+        if (cfg.BatchSize > 0)
+            sb.Append($" --batch-size {cfg.BatchSize}");
+        if (!string.IsNullOrWhiteSpace(cfg.CacheTypeKv))
+            sb.Append($" --cache-type-k {cfg.CacheTypeKv.Trim()} --cache-type-v {cfg.CacheTypeKv.Trim()}");
+        if (cfg.FlashAttn)
+            sb.Append(" --flash-attn on");
+        if (!string.IsNullOrWhiteSpace(cfg.SpecType))
+        {
+            sb.Append($" --spec-type {cfg.SpecType.Trim()}");
+            if (cfg.SpecDraftNMax > 0)
+                sb.Append($" --spec-draft-n-max {cfg.SpecDraftNMax}");
+        }
+        if (cfg.CacheReq)
+            sb.Append(" --cache-req");
+        if (cfg.BatchThreads > 0)
+            sb.Append($" --tb {cfg.BatchThreads}");
         if (!string.IsNullOrWhiteSpace(cfg.ExtraArgs))
             sb.Append(' ').Append(cfg.ExtraArgs.Trim());
         return sb.ToString();
