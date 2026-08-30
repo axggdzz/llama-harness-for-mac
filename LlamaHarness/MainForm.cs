@@ -2132,6 +2132,7 @@ public class MainForm : Form
         if (!_config.Save(out string? err))
             AppendLog($"警告：配置保存失败：{err}");
         _scheduler.Dispose();
+        LogFile.Shutdown(); // E-6：Flush + 关闭常驻日志写入器（防缓冲丢失）
     }
 
     // ==================== 日志 ====================

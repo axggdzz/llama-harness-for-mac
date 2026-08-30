@@ -1005,25 +1005,44 @@ public sealed class SmartScheduler : IDisposable
         }
     }
 
-    /// <summary>前缀指纹：SHA256(最新一轮之前的全部 messages JSON)。null = 无状态单轮请求（无比对基线）。
-    /// E-1：直接读调用方持有的 DOM，不再单独 parse。</summary>
+    /// <summary>前缀指纹（E-4 轻量版）：消息条数 + 各条 role|content长度 序列，零全量序列化、零 SHA256。
+    /// 旧实现对除末条外全部 messages 做 ToJsonString + SHA256（大上下文每请求数 MB 开销），仅用于 [KV-HIT]/[KV-MISS] 日志判定；
+    /// 轻量指纹的碰撞概率对该场景可接受（误 HIT 只影响日志，不影响实际 KV 行为）。null = 无状态单轮请求（无比对基线）。</summary>
     public static string? PrefixHash(JsonObject obj)
     {
         try
         {
             var msgs = obj["messages"] as System.Text.Json.Nodes.JsonArray;
             if (msgs == null || msgs.Count < 2) return null;
-            // 前缀指纹 = 最新一轮之前的全部 messages 序列化拼接（无需克隆，逐元素 ToJsonString）
-            var sb = new StringBuilder();
+            // 指纹形如 "12:user|1834,assistant|92,..."（条数 + 除末条外各条 role|content长度）
+            var sb = new StringBuilder(msgs.Count * 24);
+            sb.Append(msgs.Count);
             for (int i = 0; i < msgs.Count - 1; i++)
-                sb.Append(msgs[i]?.ToJsonString() ?? "null").Append(',');
-            using var sha = System.Security.Cryptography.SHA256.Create();
-            var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
-            return Convert.ToHexString(bytes);
+            {
+                var m = msgs[i]?.AsObject();
+                var role = m?["role"]?.GetValue<string>() ?? "?";
+                sb.Append(',').Append(role).Append('|').Append(ContentLen(m));
+            }
+            return sb.ToString();
         }
         catch
         {
             return null;
+        }
+    }
+
+    /// <summary>消息 content 长度（string = 字符数；数组型 = 序列化长度；无 = 0）。仅用于轻量指纹。</summary>
+    private static int ContentLen(JsonObject? m)
+    {
+        var c = m?["content"];
+        if (c == null) return 0;
+        try
+        {
+            return c.GetValue<string>()?.Length ?? 0;
+        }
+        catch
+        {
+            return c.ToJsonString().Length; // 数组型 content：序列化长度作口径
         }
     }
 
