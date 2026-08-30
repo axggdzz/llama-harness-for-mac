@@ -22,9 +22,6 @@ public sealed class SlotAffinity
     /// <summary>槽位绑定持久化路径：项目目录下 config/slot_bindings.json。</summary>
     private static readonly string BindingsPath = Path.Combine(AppContext.BaseDirectory, "config", "slot_bindings.json");
 
-    /// <summary>排队等待上限（秒）。全槽被强占时新请求最多等这么久。</summary>
-    private const int MaxWaitSeconds = 30;
-
     internal struct Binding
     {
         public int Slot;
@@ -33,9 +30,13 @@ public sealed class SlotAffinity
         public bool KvCache;
     }
 
-    public SlotAffinity(int slotCount)
+    /// <summary>排队等待上限（秒）。全槽被强占时新请求最多等这么久。</summary>
+    private readonly int _maxWaitSeconds;
+
+    public SlotAffinity(int slotCount, int maxWaitSeconds = 30)
     {
         _slotCount = Math.Max(1, slotCount);
+        _maxWaitSeconds = Math.Max(1, maxWaitSeconds);
         Load();
     }
 
@@ -82,77 +83,86 @@ public sealed class SlotAffinity
 
     /// <summary>
     /// 获取请求的槽位：已绑定 → 其槽位（刷新活跃时间）；新 Key → 空闲槽或 LRU 驱逐。
-    /// 全被强占占满 → 排队等待（上限 30s），超时降级随机槽。
+    /// 全被强占占满 → 排队等待（上限 _maxWaitSeconds），超时降级随机槽。
+    /// E-5：两阶段——锁内只做判定（阶段 1），排队 Sleep 在锁外（阶段 2），
+    /// 等待期间其他请求的 GetSlot/SetPreemptive/Snapshot 不再被阻塞（旧实现 Sleep-in-lock 最长卡 30s）。
     /// </summary>
     /// <param name="autoPreemptive">自动强占前缀集合（§4.2 主力会话冻结）：key 匹配任一前缀 → 强制 Preemptive=true（暂停 LRU 驱逐）。</param>
     /// <returns>(slot, key, isNewBinding, evictedKey, evictedSlot, evictedKvCache)</returns>
     public (int Slot, string? Key, bool NewBinding, string? Evicted, int EvictedSlot, bool EvictedKvCache) GetSlot(
         NameValueCollection headers, IReadOnlyList<string>? autoPreemptive = null)
     {
+        var key = GetAffinityKey(headers);
+        if (string.IsNullOrEmpty(key))
+            return (Random.Shared.Next(_slotCount), null, false, null, -1, false);
+
+        // §4.2：应用类型在自动强占集合 → 强制冻结（新绑定创建时 + 已有绑定每次访问）
+        bool autoPre = autoPreemptive != null && autoPreemptive.Any(p => !string.IsNullOrEmpty(p) && key.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+
+        // ── 阶段 1（锁内）：已有绑定刷新 / 空闲槽 / LRU 驱逐判定 ──
         lock (_gate)
         {
-            var key = GetAffinityKey(headers);
-            if (string.IsNullOrEmpty(key))
-                return (Random.Shared.Next(_slotCount), null, false, null, -1, false);
-
-            // §4.2：应用类型在自动强占集合 → 强制冻结（新绑定创建时 + 已有绑定每次访问）
-            bool autoPre = autoPreemptive != null && autoPreemptive.Any(p => !string.IsNullOrEmpty(p) && key.StartsWith(p, StringComparison.OrdinalIgnoreCase));
-
             if (_bindings.TryGetValue(key, out var b))
             {
                 _bindings[key] = new Binding { Slot = b.Slot, LastActive = DateTime.Now, Preemptive = b.Preemptive || autoPre, KvCache = b.KvCache };
                 return (b.Slot, key, false, null, -1, false);
             }
 
-            // 新 Key：优先分配无其他绑定的槽；全占则驱逐最久未活跃的非强占绑定
-            string? evicted = null;
-            int evictedSlot = -1;
-            bool evictedKvCache = false;
-            int slot = FindFreeSlotLocked();
-            if (slot < 0)
-            {
-                // 找可驱逐目标（非强占）
-                var lruKey = _bindings.Where(kv => !kv.Value.Preemptive).OrderBy(kv => kv.Value.LastActive).FirstOrDefault().Key;
-                if (!string.IsNullOrEmpty(lruKey))
-                {
-                    slot = _bindings[lruKey].Slot;
-                    evictedSlot = slot;
-                    evictedKvCache = _bindings[lruKey].KvCache;
-                    _bindings.Remove(lruKey);
-                    evicted = lruKey;
-                }
-                else
-                {
-                    // 全被强占占满 → 排队等待
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-                    while (sw.Elapsed.TotalSeconds < MaxWaitSeconds)
-                    {
-                        Thread.Sleep(1000);
-                        slot = FindFreeSlotLocked();
-                        if (slot >= 0) break;
-                        // 检查是否有非强占绑定被释放（理论上不会，但安全起见）
-                        var retry = _bindings.Where(kv => !kv.Value.Preemptive).OrderBy(kv => kv.Value.LastActive).FirstOrDefault();
-                        if (retry.Key != null)
-                        {
-                            slot = retry.Value.Slot;
-                            evictedSlot = slot;
-                            evictedKvCache = retry.Value.KvCache;
-                            _bindings.Remove(retry.Key);
-                            evicted = retry.Key;
-                            break;
-                        }
-                    }
-                    if (slot < 0)
-                    {
-                        // 超时降级：随机槽，不建绑定
-                        return (Random.Shared.Next(_slotCount), null, false, null, -1, false);
-                    }
-                }
-            }
-            _bindings[key] = new Binding { Slot = slot, LastActive = DateTime.Now, Preemptive = autoPre, KvCache = true };
-            Save();
-            return (slot, key, true, evicted, evictedSlot, evictedKvCache);
+            var alloc = TryAllocateLocked(key, autoPre);
+            if (alloc.Slot != null)
+                return (alloc.Slot!.Value, key, true, alloc.Evicted, alloc.EvictedSlot, alloc.EvictedKvCache);
+            // 全被强占占满 → 锁外排队（E-5）
         }
+
+        // ── 阶段 2（锁外）：排队等待（上限 _maxWaitSeconds），Sleep 不持锁 ──
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed.TotalSeconds < _maxWaitSeconds)
+        {
+            Thread.Sleep(1000);
+            lock (_gate)
+            {
+                var alloc = TryAllocateLocked(key, autoPre);
+                if (alloc.Slot != null)
+                    return (alloc.Slot!.Value, key, true, alloc.Evicted, alloc.EvictedSlot, alloc.EvictedKvCache);
+            }
+        }
+
+        // 超时降级：随机槽，不建绑定
+        return (Random.Shared.Next(_slotCount), null, false, null, -1, false);
+    }
+
+    /// <summary>锁内原子分配：空闲槽 → LRU 驱逐非强占 → 建绑定 + 持久化。
+    /// Slot=null = 全被强占占满（调用方锁外排队）。重复 key 并发时采纳已有绑定（保持旧单锁语义）。</summary>
+    private (int? Slot, string? Evicted, int EvictedSlot, bool EvictedKvCache) TryAllocateLocked(string key, bool autoPre)
+    {
+        if (_bindings.TryGetValue(key, out var existing))
+            return (existing.Slot, null, -1, false); // 重复 key 并发：采纳已有绑定
+
+        // 新 Key：优先分配无其他绑定的槽；全占则驱逐最久未活跃的非强占绑定
+        int? slot = FindFreeSlotLocked();
+        string? evicted = null;
+        int evictedSlot = -1;
+        bool evictedKvCache = false;
+        if (slot < 0)
+        {
+            // 找可驱逐目标（非强占）
+            var lruKey = _bindings.Where(kv => !kv.Value.Preemptive).OrderBy(kv => kv.Value.LastActive).FirstOrDefault().Key;
+            if (!string.IsNullOrEmpty(lruKey))
+            {
+                slot = _bindings[lruKey].Slot;
+                evictedSlot = slot.Value;
+                evictedKvCache = _bindings[lruKey].KvCache;
+                _bindings.Remove(lruKey);
+                evicted = lruKey;
+            }
+            else
+            {
+                return (null, null, -1, false); // 全被强占占满
+            }
+        }
+        _bindings[key] = new Binding { Slot = slot!.Value, LastActive = DateTime.Now, Preemptive = autoPre, KvCache = true };
+        Save();
+        return (slot.Value, evicted, evictedSlot, evictedKvCache);
     }
 
     /// <summary>指定 Key 当前是否为强占（Tool 链锁定判定用）。</summary>
