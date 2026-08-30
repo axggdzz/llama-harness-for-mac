@@ -110,6 +110,9 @@ public sealed class SmartScheduler : IDisposable
     /// <summary>KV Cache 管理器（--parallel &gt; 1 且 KvCachePath 非空时创建；null = 禁用）。</summary>
     private volatile KvCacheManager? _kvCache;
 
+    /// <summary>Restore 命中率可观测（3.1）：与 KV Cache 同生命周期启用；null = 禁用。</summary>
+    private volatile RestoreStats? _restoreStats;
+
     // ==================== KV 全场景复用状态（§4.1/§4.5/§8，多 agent 并发请求共享）====================
 
     /// <summary>KV 复用状态统一门控（_truncPending / _toolLockedKeys / _prefixHashes 共用）。</summary>
@@ -187,6 +190,9 @@ public sealed class SmartScheduler : IDisposable
     /// <summary>获取 KV Cache 管理器（UI 清空缓存用）。null = 未启用。</summary>
     public KvCacheManager? GetKvCache() => _kvCache;
 
+    /// <summary>获取 Restore 命中率统计（UI「Restore 命中率」卡片用）。null = 未启用。</summary>
+    public RestoreStats? GetRestoreStats() => _restoreStats;
+
     public SmartScheduler(AppConfig cfg)
     {
         _cfg = cfg;
@@ -228,6 +234,24 @@ public sealed class SmartScheduler : IDisposable
         CrashRecovery.OnBackendLine(line);
         if (line.Contains("bad allocation", StringComparison.OrdinalIgnoreCase))
             Log?.Invoke($"⚠ 检测到后端 bad_alloc（任务级内存耗尽），已记录崩溃事件。");
+        // 3.1 Restore 命中率判定：prompt eval tokens 为唯一真值源（mini 状态机，FIFO 归属 + TTL 防错位）
+        var rs = _restoreStats;
+        if (rs != null && line.Contains("prompt eval time", StringComparison.Ordinal)
+            && RestoreStats.TryParsePromptEvalTokens(line, out int nEval))
+        {
+            var r = rs.OnPromptEval(nEval);
+            if (r != null)
+            {
+                EmitSlot($"[KV-RESTORE-JUDGE] key={r.Key} hit={(r.Hit ? 1 : 0)} reason={r.Reason} prompt_eval={r.PromptEvalTokens} saved_n={r.SavedN} wrapper_hit={(r.WrapperHit ? 1 : 0)} false_miss={(r.FalseMiss ? 1 : 0)} false_hit={(r.FalseHit ? 1 : 0)}");
+                if (r.Alert != RestoreStats.AlertLevel.None)
+                {
+                    var msg = $"Restore 命中率告警：总命中率 {(r.HitRate * 100):F1}%（{(r.Alert == RestoreStats.AlertLevel.Red ? "红色" : "黄色")}）";
+                    // 含「警告/错误」字样 → LogFile.Append 自动入 warn_error.log
+                    Log?.Invoke((r.Alert == RestoreStats.AlertLevel.Red ? "错误：" : "警告：") + msg);
+                    EmitSlot(msg);
+                }
+            }
+        }
         lock (_recentOutput)
         {
             _recentOutput.Enqueue(line);
@@ -485,6 +509,8 @@ public sealed class SmartScheduler : IDisposable
             _kvCache = !string.IsNullOrWhiteSpace(_cfg.KvCachePath)
                 ? new KvCacheManager(_hc, _cfg.KvCachePath, _cfg.Parallel, srvPort)
                 : null;
+            // 3.1 Restore 命中率可观测：与 KV Cache 同生命周期（累计统计跨唤醒周期持久化于 config/restore_stats.json）
+            _restoreStats = _kvCache != null ? new RestoreStats() : null;
             if (_kvCache != null)
                 Log?.Invoke($"KV Cache 持久化已启用：路径 {_cfg.KvCachePath}（驱逐自动 save，重绑定自动 restore，休眠前自动 save，唤醒后自动 restore）。");
 
@@ -706,7 +732,14 @@ public sealed class SmartScheduler : IDisposable
 
         // §8 可观测：前缀哈希 HIT/MISS 判定（原生 KV 前缀复用；TokenGuard 之后按实际下发体计算）
         if (routedKey != null)
-            LogPrefixHash(routedKey, root);
+        {
+            bool? wrapperHit = LogPrefixHash(routedKey, root);
+            // 3.1：入队 restore 判定上下文（仅该 key 存在快照时；FIFO + TTL 防错位，prompt eval 行到达时弹最旧条目判定）
+            var rs = _restoreStats;
+            var kvc = _kvCache;
+            if (rs != null && routedSlot is int rsSlot && kvc != null && kvc.HasCache(routedKey))
+                rs.RecordRequest(routedKey, rsSlot, wrapperHit ?? false, kvc.SavedTokens(routedKey));
+        }
 
         // 管道末端：唯一一次序列化 + 编码转换（E-1/E-3）
         if (root != null)
@@ -1089,21 +1122,25 @@ public sealed class SmartScheduler : IDisposable
         }
     }
 
-    /// <summary>§8 可观测：前缀哈希 HIT/MISS 判定。一致 → 原生 KV 前缀复用（增量 prefill）；不一致 → 全量重算。</summary>
-    private void LogPrefixHash(string key, JsonObject? root)
+    /// <summary>§8 可观测：前缀哈希 HIT/MISS 判定。一致 → 原生 KV 前缀复用（增量 prefill）；不一致 → 全量重算。
+    /// 返回 wrapper 指纹判定结果（true=HIT / false=MISS / null=无指纹数据），供 3.1 RestoreStats FIFO 归属。</summary>
+    private bool? LogPrefixHash(string key, JsonObject? root)
     {
         var hash = root != null ? PrefixHash(root) : null;
-        if (hash == null) return;
+        if (hash == null) return null;
         lock (_kvStateGate)
         {
             if (_prefixHashes.TryGetValue(key, out var prev))
             {
-                if (prev == hash)
-                    Log?.Invoke($"[KV-HIT] {key}：前缀未变 → 原生 KV 复用（增量 prefill）");
-                else
-                    Log?.Invoke($"[KV-MISS] {key}：前缀变更 → 全量重算");
+                bool hit = prev == hash;
+                Log?.Invoke(hit
+                    ? $"[KV-HIT] {key}：前缀未变 → 原生 KV 复用（增量 prefill）"
+                    : $"[KV-MISS] {key}：前缀变更 → 全量重算");
+                _prefixHashes[key] = hash;
+                return hit;
             }
             _prefixHashes[key] = hash;
+            return null; // 该 key 首次请求：无历史指纹可比
         }
     }
 
@@ -1709,6 +1746,8 @@ public sealed class SmartScheduler : IDisposable
             Log?.Invoke("休眠前 KV 保存超时（60s），放弃剩余快照，继续休眠。");
             cts.Cancel(); // CTS(60s) 自动取消与 WaitAsync 计时存在竞态：此处确保孤儿任务被取消
         }
+        // 3.1：进程即将终止，显式落盘 RestoreStats 累计统计（节流自动保存在休眠后无机会执行）
+        _restoreStats?.Save();
     }
 
     /// <summary>进程退出回调：休眠/运行态退出 → 回到监听待机；唤醒态由唤醒任务自行处理。</summary>

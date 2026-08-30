@@ -194,6 +194,7 @@ public class MainForm : Form
     // —— 侧边统计标签 ——
     private Label _lblTokenSummary;
     private Label _lblSlotSummary;
+    private Label _lblRestoreHit;   // Restore 命中率卡片（3.1 可观测）
 
     public MainForm()
     {
@@ -1276,6 +1277,12 @@ public class MainForm : Form
             Font = new Font("Consolas", 11F),
             ForeColor = C_TextFg,
         };
+        _lblRestoreHit = new Label
+        {
+            Text = "Restore: 未启用",
+            Font = new Font("Consolas", 11F),
+            ForeColor = C_TextFg,
+        };
         _lblThinking.Text = "思考: 极速";
         _lblThinking.Font = new Font("Microsoft YaHei UI", 11F);
 
@@ -1287,6 +1294,7 @@ public class MainForm : Form
             MakeCard("运行时长", _lblRunTime),
             MakeCard("Token 统计", _lblTokenSummary),
             MakeCard("槽位绑定", _lblSlotSummary),
+            MakeCard("Restore 命中率", _lblRestoreHit), // 3.1 可观测：总命中率 + 误报率 + 最近一次明细
             MakeCard("思考模式", _lblThinking),
         };
         for (int i = 0; i < cards.Length; i++)
@@ -2093,6 +2101,7 @@ public class MainForm : Form
     /// <summary>累计汇总：请求数、总 tokens、平均速度、加权命中率。同步更新侧边统计标签。</summary>
     private void UpdateSummary()
     {
+        UpdateRestoreCard(); // 3.1：Restore 命中率卡片（独立数据源，随轮次统计同步刷新）
         var rounds = _statsParser.GetRounds();
         if (rounds.Count == 0)
         {
@@ -2112,6 +2121,31 @@ public class MainForm : Form
             (gen > 0 ? $"命中: {acc}/{gen}" : "");
         _lblSummary.Text = summary;
         _lblTokenSummary.Text = summary;
+    }
+
+    /// <summary>3.1 Restore 命中率卡片：总命中率 + 误报率 + 最近一次明细；颜色按阈值（≥80% 绿 / &lt;80% 黄 / &lt;50% 红）。</summary>
+    private void UpdateRestoreCard()
+    {
+        var stats = _scheduler.GetRestoreStats();
+        if (stats == null)
+        {
+            _lblRestoreHit.Text = "Restore: 未启用";
+            _lblRestoreHit.ForeColor = C_TextFg;
+            return;
+        }
+        var s = stats.Snapshot();
+        if (s.TotalAttempts == 0)
+        {
+            _lblRestoreHit.Text = "Restore: 等待首次判定…";
+            _lblRestoreHit.ForeColor = C_TextFg;
+            return;
+        }
+        double pct = s.HitRate * 100;
+        _lblRestoreHit.ForeColor = pct < 50 ? Color.Red : pct < 80 ? Color.Gold : Color.Lime;
+        string last = s.Last != null
+            ? $"\n最近: {s.Last.Key} {(s.Last.Hit ? "HIT" : "MISS")} Δ{s.Last.PromptEvalTokens}tok (saved {s.Last.SavedN})"
+            : "";
+        _lblRestoreHit.Text = $"命中率: {pct:F1}% ({s.TotalHits}/{s.TotalAttempts}) | 误报: {s.FalseRate * 100:F1}%{last}";
     }
 
     private void ApplyPhase(SmartScheduler.Phase phase)
