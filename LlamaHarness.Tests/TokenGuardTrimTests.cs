@@ -1,0 +1,149 @@
+using System.Text.Json.Nodes;
+using LlamaHarness;
+using Xunit;
+
+namespace LlamaHarness.Tests;
+
+/// <summary>
+/// TokenGuard 裁剪逻辑单测（E-2 二分收敛）：
+/// 用确定性假计数器（token = 文本长度/10）替代 HTTP tokenize，验证：
+/// - 轮次裁剪二分收敛（tokenize 次数 ≤ log₂(轮数)+2，而非旧实现 K+1）
+/// - 内容兜底减半收敛
+/// - 失败降级语义不变
+/// </summary>
+public class TokenGuardTrimTests
+{
+    /// <summary>构造 root：system 前缀 + nTurns 个 user 轮（每轮 user+assistant，各 ~400 字符）。</summary>
+    private static JsonObject BuildRoot(int nTurns)
+    {
+        var root = new JsonObject();
+        var msgs = new JsonArray();
+        root["messages"] = msgs;
+        msgs.Add(new JsonObject { ["role"] = "system", ["content"] = new string('S', 500) });
+        for (int t = 0; t < nTurns; t++)
+        {
+            msgs.Add(new JsonObject { ["role"] = "user", ["content"] = $"Q{t}" + new string('a', 400) });
+            msgs.Add(new JsonObject { ["role"] = "assistant", ["content"] = new string('b', 400) });
+        }
+        return root;
+    }
+
+    [Fact]
+    public async Task WithinBudget_NoTrim_OriginalBodyPreserved()
+    {
+        var body = @"{""messages"":[{""role"":""user"",""content"":""hi""}]}";
+        int calls = 0;
+        Func<string, Task<int?>> counter = async t => { calls++; return t.Length / 10; };
+
+        var (ok, result, note) = await TokenGuard.GuardAsync(null!, 0, body, 10_000, counter);
+
+        Assert.True(ok);
+        Assert.Null(note);
+        Assert.Equal(body, result); // 预算内：原样返回（不重新序列化）
+        Assert.Equal(1, calls);     // 只 tokenize 一次
+    }
+
+    [Fact]
+    public async Task TurnTrim_BinarySearchConverges_FewerTokenizes()
+    {
+        var root = BuildRoot(6); // 6 轮 → maxDelete=5；旧实现最坏 1+K 次，新实现 ≤ 1+1+log₂(5)+1
+        int budget = 300;
+        int calls = 0;
+        Func<string, Task<int?>> counter = async t => { calls++; return t.Length / 10; };
+
+        var (ok, modified, note) = await TokenGuard.GuardAsync(root, null!, 0, budget, counter);
+
+        Assert.True(ok);
+        Assert.True(modified);
+        Assert.NotNull(note);
+        // tokenize 次数：初始(1) + 极端验证(1) + 二分(≤3) ≤ 6（旧实现删 K 轮 = 1+K，K≥4 时更差）
+        Assert.True(calls <= 6, $"tokenize 调用 {calls} 次，超出二分预期");
+        // 最后一轮必须保留（末条消息仍是最后一个 assistant）
+        var msgs = root["messages"]!.AsArray();
+        Assert.Equal("assistant", msgs[^1]!.AsObject()["role"]!.GetValue<string>());
+        Assert.Equal(new string('b', 400), msgs[^1]!.AsObject()["content"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task TurnTrim_FinalCountWithinBudget()
+    {
+        var root = BuildRoot(8); // 8 轮，大上下文
+        int budget = 250;
+        Func<string, Task<int?>> counter = async t => t.Length / 10;
+
+        var (ok, _, _) = await TokenGuard.GuardAsync(root, null!, 0, budget, counter);
+
+        Assert.True(ok);
+        var msgs = root["messages"]!.AsArray();
+        // 最终状态计数 ≤ 预算（用同一口径重算）
+        int finalCount = 0;
+        foreach (var m in msgs)
+        {
+            var o = m!.AsObject();
+            finalCount += ($"{o["role"]}: {o["content"]}\n").Length;
+        }
+        Assert.True(finalCount / 10 <= budget, $"最终 {finalCount / 10} tokens 超预算 {budget}");
+    }
+
+    [Fact]
+    public async Task TokenizeFailureMidTrim_DegradesToUnmodified()
+    {
+        var root = BuildRoot(4);
+        int budget = 300;
+        int calls = 0;
+        // 第 2 次 tokenize 起失败（模拟后端忙）
+        Func<string, Task<int?>> counter = async t =>
+        {
+            calls++;
+            return calls == 1 ? t.Length / 10 : null;
+        };
+
+        var (ok, modified, note) = await TokenGuard.GuardAsync(root, null!, 0, budget, counter);
+
+        Assert.True(ok);          // 降级不阻断
+        Assert.False(modified);   // 未修改状态透传
+        Assert.Null(note);
+    }
+
+    [Fact]
+    public async Task ContentFallback_HalvingConverges()
+    {
+        // 单轮 + 巨型 content（10 万字符 ≈ 1 万 tokens）：轮次无可删 → 内容兜底
+        var root = new JsonObject();
+        var msgs = new JsonArray();
+        root["messages"] = msgs;
+        msgs.Add(new JsonObject { ["role"] = "user", ["content"] = new string('x', 100_000) });
+
+        int budget = 6_500;
+        int calls = 0;
+        Func<string, Task<int?>> counter = async t => { calls++; return t.Length / 10; };
+
+        var (ok, modified, _) = await TokenGuard.GuardAsync(root, null!, 0, budget, counter);
+
+        Assert.True(ok);
+        Assert.True(modified);
+        // 收敛：≤ 初始(1) + 兜底(≤5) 次
+        Assert.True(calls <= 6, $"tokenize 调用 {calls} 次，超出减半收敛预期");
+        var content = msgs[0]!.AsObject()["content"]!.GetValue<string>();
+        Assert.Contains("[已截断 - Token Guard]", content);
+    }
+
+    [Fact]
+    public async Task NoUserMessages_PassThrough()
+    {
+        var root = new JsonObject();
+        root["messages"] = new JsonArray
+        {
+            new JsonObject { ["role"] = "system", ["content"] = new string('s', 10_000) },
+        };
+        int calls = 0;
+        Func<string, Task<int?>> counter = async t => { calls++; return t.Length / 10; };
+
+        var (ok, modified, note) = await TokenGuard.GuardAsync(root, null!, 0, 100, counter);
+
+        Assert.True(ok);
+        Assert.False(modified);
+        Assert.Null(note);
+        Assert.Equal(1, calls); // 只计数一次，无可裁
+    }
+}

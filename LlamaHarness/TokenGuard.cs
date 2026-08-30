@@ -75,38 +75,76 @@ public static class TokenGuard
         for (int i = firstUser; i <= lastUser; i++)
             if (RoleOf(messages[i]) == "user") turnStarts.Add(i);
 
+        // ── 轮次制裁剪（E-2 二分收敛）──
+        // 旧实现每删一轮全量重 tokenize（最坏 K+1 次 HTTP 往返，串行阻塞关键路径）。
+        // 现：按轮预切分，试评估只在索引区间上拼计数文本（零节点搬移），
+        // 二分 ≤ log₂(轮数)+1 次 tokenize 收敛；收敛后批量破坏性删除。
+        int maxDelete = turnStarts.Count - 1; // 必须保留最后一轮
         int deletedTurns = 0;
-        while (count > budget && turnStarts.Count > 1)
+        if (maxDelete > 0)
         {
-            int start = turnStarts[0];
-            int end = turnStarts[1]; // 下一轮起点（不含）
-            for (int i = end - 1; i >= start; i--) messages.RemoveAt(i);
-            turnStarts.RemoveAt(0);
-            deletedTurns++;
-            count = await counter(BuildMessagesText(messages)) ?? -1;
-            if (count < 0) return (true, deletedTurns > 0, null); // 中途降级：用当前状态
+            // 试评估 f(k) = "前缀(首个 user 前) + turns[k..]" 的 token 数：跳过前 k 轮的索引区间 [turnStarts[0], turnStarts[k])
+            async Task<int?> EvalK(int k)
+            {
+                var sb = new StringBuilder();
+                for (int i = 0; i < turnStarts[0]; i++) AppendMsgText(sb, messages[i]);
+                for (int i = turnStarts[k]; i < messages.Count; i++) AppendMsgText(sb, messages[i]);
+                return await counter(sb.ToString());
+            }
+
+            // 先验极端：删光全部可删轮仍超预算 → 无 K 可行，删到最小集进内容兜底
+            int countMax = await EvalK(maxDelete) ?? -1;
+            if (countMax < 0) return (true, false, null); // tokenize 失败：降级为未修改状态
+            if (countMax <= budget)
+            {
+                // 二分求 [1, maxDelete] 中满足预算的最小 K（token 数随 K 单调不增）
+                int lo = 1, hi = maxDelete;
+                int finalCount = countMax; // f(maxDelete) 已知可行
+                while (lo < hi)
+                {
+                    int mid = (lo + hi) / 2;
+                    int c = await EvalK(mid) ?? -1;
+                    if (c < 0) return (true, false, null); // tokenize 失败：降级为未修改状态
+                    if (c <= budget) { hi = mid; finalCount = c; }
+                    else lo = mid + 1;
+                }
+                deletedTurns = hi;
+                count = finalCount;
+            }
+            else
+            {
+                deletedTurns = maxDelete;
+                count = countMax;
+            }
+
+            // 批量破坏性删除前 deletedTurns 轮（与 EvalK 计数口径一致，无需再 tokenize）
+            for (int t = deletedTurns - 1; t >= 0; t--)
+            {
+                int start = turnStarts[t];
+                int end = turnStarts[t + 1]; // 下一轮起点（不含）
+                for (int i = end - 1; i >= start; i--) messages.RemoveAt(i);
+            }
         }
 
-        // ── 内容兜底 ── 最小集仍超 → 截断最大消息内容（巨型 tool_result 等）
+        // ── 内容兜底（E-2 二分收敛）── 最小集仍超 → 截断最大消息内容（巨型 tool_result 等）
+        // 保留比例取线性估算 budget/count；一轮后仍超则比例减半（二分步），≤5 轮收敛（旧实现固定 ratio 迭代最多 10 轮）
         bool contentTruncated = false;
-        if (count > budget)
+        double retain = Math.Max(0.1, (double)budget / count);
+        for (int iter = 0; iter < 5 && count > budget; iter++)
         {
-            for (int iter = 0; iter < 10 && count > budget; iter++)
-            {
-                int maxIdx = IndexOfLargestContent(messages);
-                string? content = maxIdx >= 0 ? GetContent(messages[maxIdx]) : null;
-                if (content == null || content.Length < 200) break; // 无可再裁的内容
-                double ratio = Math.Max(0.1, 1.0 - (count - (double)budget) / count);
-                int newLen = Math.Max(50, (int)(content.Length * ratio));
-                // O-14：头尾双保留（头部留上下文、尾部留最新信息），替代纯头部截断
-                int half = newLen / 2;
-                int tail = newLen - half;
-                string kept = content[..half] + "\n[…]\n" + content[^tail..];
-                SetContent(messages[maxIdx], kept + "\n[已截断 - Token Guard]");
-                contentTruncated = true;
-                count = await counter(BuildMessagesText(messages)) ?? -1;
-                if (count < 0) return (true, deletedTurns > 0 || contentTruncated, null);
-            }
+            int maxIdx = IndexOfLargestContent(messages);
+            string? content = maxIdx >= 0 ? GetContent(messages[maxIdx]) : null;
+            if (content == null || content.Length < 200) break; // 无可再裁的内容
+            int newLen = Math.Max(50, (int)(content.Length * retain));
+            // O-14：头尾双保留（头部留上下文、尾部留最新信息），替代纯头部截断
+            int half = newLen / 2;
+            int tail = newLen - half;
+            string kept = content[..half] + "\n[…]\n" + content[^tail..];
+            SetContent(messages[maxIdx], kept + "\n[已截断 - Token Guard]");
+            contentTruncated = true;
+            count = await counter(BuildMessagesText(messages)) ?? -1;
+            if (count < 0) return (true, deletedTurns > 0 || contentTruncated, null);
+            retain = Math.Max(0.1, retain / 2); // 仍超 → 保留比例减半（二分步）
         }
 
         bool modified = deletedTurns > 0 || contentTruncated;
@@ -126,7 +164,8 @@ public static class TokenGuard
     /// 最小集仍超预算 → (false, null, 错误信息)，调用方返回 400。
     /// </summary>
     public static async Task<(bool Ok, string? Body, string? Note)> GuardAsync(
-        HttpClient hc, int backendPort, string body, int budget)
+        HttpClient hc, int backendPort, string body, int budget,
+        Func<string, Task<int?>>? countTokens = null)
     {
         // 解析 body 提取 messages（非 JSON / 无 messages → 透传）
         JsonObject? root;
@@ -140,7 +179,7 @@ public static class TokenGuard
         }
         if (root == null) return (true, body, null);
 
-        var (ok, modified, note) = await GuardAsync(root, hc, backendPort, budget);
+        var (ok, modified, note) = await GuardAsync(root, hc, backendPort, budget, countTokens);
         return (ok, ok ? (modified ? root.ToJsonString() : body) : null, note);
     }
 
@@ -150,17 +189,20 @@ public static class TokenGuard
     private static string BuildMessagesText(JsonArray messages)
     {
         var sb = new StringBuilder();
-        foreach (var m in messages)
-        {
-            var o = m?.AsObject();
-            if (o == null) continue;
-            var role = o["role"]?.GetValue<string>() ?? "";
-            var c = o["content"];
-            string? content = null;
-            try { content = c?.GetValue<string>(); } catch { /* 数组型 content */ }
-            sb.Append(role).Append(": ").Append(content ?? c?.ToJsonString() ?? "").Append("\n");
-        }
+        foreach (var m in messages) AppendMsgText(sb, m);
         return sb.ToString();
+    }
+
+    /// <summary>把单条消息的 role+content 追加到计数文本（与 BuildMessagesText 同口径；二分试评估复用）。</summary>
+    private static void AppendMsgText(StringBuilder sb, JsonNode? msg)
+    {
+        var o = msg?.AsObject();
+        if (o == null) return;
+        var role = o["role"]?.GetValue<string>() ?? "";
+        var c = o["content"];
+        string? content = null;
+        try { content = c?.GetValue<string>(); } catch { /* 数组型 content */ }
+        sb.Append(role).Append(": ").Append(content ?? c?.ToJsonString() ?? "").Append("\n");
     }
 
     /// <summary>取消息 role 字段；null = 非对象。</summary>
