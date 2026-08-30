@@ -12,15 +12,8 @@ public static class LogFile
 {
     private static readonly object _gate = new();
 
-    /// <summary>日志目录：项目目录下 logs/（首次写入时自动创建）。</summary>
+    /// <summary>日志目录：项目目录下 logs/（写入器首次打开时自动创建）。</summary>
     internal static string LogDir => Path.Combine(AppContext.BaseDirectory, "logs");
-
-    /// <summary>确保日志目录存在（幂等）。</summary>
-    private static void EnsureLogDir()
-    {
-        var dir = LogDir;
-        if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-    }
 
     /// <summary>主日志大小上限（字节）。</summary>
     private const long MaxLogBytes = 2_000_000;
@@ -148,7 +141,7 @@ public static class LogFile
             {
                 var stamped = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {line}";
                 if (_slotWriter.RotateIfNeeded(MaxLogBytes)) { /* 已轮切，下条自动重开 */ }
-                _slotWriter.WriteLine(stamped + Environment.NewLine);
+                _slotWriter.Write(stamped + Environment.NewLine);
             }
             catch
             {
@@ -161,7 +154,7 @@ public static class LogFile
     private static void AppendMain(string stampedLine)
     {
         if (_mainWriter.RotateIfNeeded(MaxLogBytes)) { /* 已轮切 */ }
-        _mainWriter.WriteLine(stampedLine + Environment.NewLine);
+        _mainWriter.Write(stampedLine + Environment.NewLine);
     }
 
     /// <summary>写警告/错误日志 logs/warn_error.log：前 10 条上下文 + 分隔标记 + 本条。（调用方已持 _gate）</summary>
@@ -173,84 +166,6 @@ public static class LogFile
             sb.Append(l).Append(Environment.NewLine);
         sb.Append($"===== {lvl} =====").Append(Environment.NewLine);
         sb.Append(stampedLine).Append(Environment.NewLine);
-        _warnWriter.WriteBlock(sb.ToString());
-    }
-
-    /// <summary>常驻日志写入器（E-6）：单个 StreamWriter 缓冲写，150ms 定时 Flush，按大小轮切（close→rename→reopen）。
-    /// 替代旧实现每行 File.AppendAllText（open/write/close 系统调用），推理期 I/O 降一个数量级。</summary>
-    private sealed class LogStreamWriter : IDisposable
-    {
-        private readonly string _path;
-        private StreamWriter? _writer;
-        private long _bytes;
-        private bool _initialized;
-
-        public LogStreamWriter(string path) => _path = path;
-
-        /// <summary>写一行（调用方持 LogFile._gate）。</summary>
-        public void WriteLine(string line)
-        {
-            EnsureOpen();
-            _writer!.Write(line);
-            _bytes += Encoding.UTF8.GetByteCount(line);
-        }
-
-        /// <summary>写多行块（警告/错误上下文块）。</summary>
-        public void WriteBlock(string block)
-        {
-            EnsureOpen();
-            _writer!.Write(block);
-            _bytes += Encoding.UTF8.GetByteCount(block);
-        }
-
-        public void Flush()
-        {
-            try { _writer?.Flush(); } catch { /* 尽力而为 */ }
-        }
-
-        /// <summary>按大小轮切：close → path→path.1（覆盖旧备份）→ 下次写自动重开。返回是否发生轮切。</summary>
-        public bool RotateIfNeeded(long maxBytes)
-        {
-            if (_bytes <= maxBytes) return false;
-            CloseQuiet();
-            try
-            {
-                var backup = _path + ".1";
-                if (File.Exists(backup)) File.Delete(backup);
-                File.Move(_path, backup);
-            }
-            catch
-            {
-                // 轮切失败不影响写入（下次 EnsureOpen 仍会打开原文件追加）
-            }
-            _bytes = 0;
-            return true;
-        }
-
-        private void EnsureOpen()
-        {
-            if (_writer != null) return;
-            EnsureLogDir();
-            _writer = new StreamWriter(new FileStream(_path, FileMode.Append, FileAccess.Write, FileShare.Read), Encoding.UTF8, 4096);
-            if (!_initialized)
-            {
-                // 首次打开：以既有文件大小为轮切基准（追加模式不重置计数）
-                var fi = new FileInfo(_path);
-                _bytes = fi.Exists ? fi.Length : 0;
-                _initialized = true;
-            }
-        }
-
-        private void CloseQuiet()
-        {
-            try { _writer?.Dispose(); } catch { /* 尽力而为 */ }
-            _writer = null;
-        }
-
-        public void Dispose()
-        {
-            Flush();
-            CloseQuiet();
-        }
+        _warnWriter.Write(sb.ToString());
     }
 }
