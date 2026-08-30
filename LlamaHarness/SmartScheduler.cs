@@ -471,6 +471,10 @@ public sealed class SmartScheduler : IDisposable
 
             // 槽位亲和：始终启用（单槽/多槽均激活），指纹绑定 + n_slots 路由
             _affinity = new SlotAffinity(_cfg.Parallel);
+            // 启动时强制：裁剪超额强占到 ≤ slotCount-1（保"至少 1 槽给非强占新任务"不变量）
+            var evictedPreemptive = _affinity.EnforcePreemptiveCap();
+            if (evictedPreemptive.Count > 0)
+                Log?.Invoke($"强占裁剪：{string.Join(", ", evictedPreemptive)} 取消强占（保 ≥1 槽给非强占任务）。");
             Log?.Invoke($"槽位亲和已启用：{_cfg.Parallel} 槽，指纹绑定 + n_slots 路由（绑定表 slot_bindings.json，LRU 驱逐）。");
 
             // KV Cache 持久化：KvCachePath 非空时启用（驱逐 save / 重绑定 restore / 休眠前 save / 唤醒后 restore）
@@ -746,11 +750,13 @@ public sealed class SmartScheduler : IDisposable
             }
             if (didLock)
             {
+                aff.MarkToolLocked(key); // 标记到 SlotAffinity（驱逐优先级：Tool 锁定 > 手动/自动强占）
                 aff.SetPreemptive(key, true); // 移出锁外（O-15）
                 EmitSlot($"[KV-LOCK] Tool 链会话锁定：{key} → slot{slot}（强占，不驱逐）");
             }
             else if (didUnlock)
             {
+                aff.UnmarkToolLocked(key);
                 aff.SetPreemptive(key, false);
                 EmitSlot($"[KV-UNLOCK] Tool 链结束，解除锁定：{key}");
             }

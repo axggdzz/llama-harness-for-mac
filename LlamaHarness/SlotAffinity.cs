@@ -33,11 +33,17 @@ public sealed class SlotAffinity
     /// <summary>排队等待上限（秒）。全槽被强占时新请求最多等这么久。</summary>
     private readonly int _maxWaitSeconds;
 
+    /// <summary>Tool 链锁定集合（§4.5）：本层执行过 SetPreemptive(true) 的 key。
+    /// 驱逐优先级：Tool 链锁定 > 手动/自动强占（Tool 是瞬态的，循环结束自动解锁）。</summary>
+    private readonly HashSet<string> _toolLockedKeys = new(StringComparer.OrdinalIgnoreCase);
+
     public SlotAffinity(int slotCount, int maxWaitSeconds = 30)
     {
         _slotCount = Math.Max(1, slotCount);
         _maxWaitSeconds = Math.Max(1, maxWaitSeconds);
         Load();
+        // 启动时强制：从持久化恢复后裁剪超额强占（防旧实现遗留全槽强占死锁）
+        EnforcePreemptiveCap();
     }
 
     /// <summary>槽位数。</summary>
@@ -157,12 +163,98 @@ public sealed class SlotAffinity
             }
             else
             {
-                return (null, null, -1, false); // 全被强占占满
+                // 全被强占占满：若新 key 也是强占 → 驱逐最早活跃的强占绑定（保"至少 1 槽给非强占"不变量）
+                if (autoPre)
+                {
+                    var victim = FindEvictablePreemptiveLocked();
+                    if (!string.IsNullOrEmpty(victim))
+                    {
+                        slot = _bindings[victim].Slot;
+                        evictedSlot = slot.Value;
+                        evictedKvCache = _bindings[victim].KvCache;
+                        _bindings.Remove(victim);
+                        evicted = victim;
+                    }
+                    else
+                    {
+                        return (null, null, -1, false); // 无可驱逐（理论上不会：cap 保证 ≤ slotCount-1）
+                    }
+                }
+                else
+                {
+                    return (null, null, -1, false); // 非强占新 key + 全槽强占 → 排队
+                }
             }
         }
         _bindings[key] = new Binding { Slot = slot!.Value, LastActive = DateTime.Now, Preemptive = autoPre, KvCache = true };
         Save();
         return (slot.Value, evicted, evictedSlot, evictedKvCache);
+    }
+
+    /// <summary>启动时强制：裁剪超额强占到 ≤ slotCount-1（保"至少 1 槽给非强占新任务"不变量）。
+    /// 驱逐优先级：Tool 链锁定 > 最早活跃的手动/自动强占。返回被取消强占的 key 列表。</summary>
+    public List<string> EnforcePreemptiveCap()
+    {
+        lock (_gate)
+        {
+            var preemptiveKeys = _bindings.Where(kv => kv.Value.Preemptive).Select(kv => kv.Key).ToList();
+            int cap = Math.Max(0, _slotCount - 1);
+            if (preemptiveKeys.Count <= cap) return new List<string>();
+
+            // 需驱逐数 = 当前强占数 - cap
+            int toEvict = preemptiveKeys.Count - cap;
+            var evicted = new List<string>();
+
+            // 优先级 1：Tool 链锁定（瞬态，循环结束自动解锁）——按最早活跃排序
+            for (int i = 0; i < toEvict; i++)
+            {
+                var toolKey = _bindings.Where(kv => kv.Value.Preemptive && _toolLockedKeys.Contains(kv.Key))
+                                         .OrderBy(kv => kv.Value.LastActive).FirstOrDefault().Key;
+                if (string.IsNullOrEmpty(toolKey)) break;
+                _bindings[toolKey] = new Binding { Slot = _bindings[toolKey].Slot, LastActive = _bindings[toolKey].LastActive, Preemptive = false, KvCache = _bindings[toolKey].KvCache };
+                _toolLockedKeys.Remove(toolKey);
+                evicted.Add(toolKey);
+            }
+
+            // 优先级 2：最早活跃的手动/自动强占（最久持有 = 最该让位）
+            int remaining = toEvict - evicted.Count;
+            for (int i = 0; i < remaining; i++)
+            {
+                var key = _bindings.Where(kv => kv.Value.Preemptive)
+                                    .OrderBy(kv => kv.Value.LastActive).FirstOrDefault().Key;
+                if (string.IsNullOrEmpty(key)) break;
+                _bindings[key] = new Binding { Slot = _bindings[key].Slot, LastActive = _bindings[key].LastActive, Preemptive = false, KvCache = _bindings[key].KvCache };
+                evicted.Add(key);
+            }
+
+            Save();
+            return evicted;
+        }
+    }
+
+    /// <summary>锁内查找可驱逐的强占绑定（TryAllocateLocked 用）：Tool 链锁定优先，其次最早活跃。
+    /// 返回 null = 无可驱逐（cap 保证 ≤ slotCount-1，理论上不会发生）。</summary>
+    private string? FindEvictablePreemptiveLocked()
+    {
+        // Tool 链锁定优先（瞬态）
+        var toolKey = _bindings.Where(kv => kv.Value.Preemptive && _toolLockedKeys.Contains(kv.Key))
+                                .OrderBy(kv => kv.Value.LastActive).FirstOrDefault().Key;
+        if (!string.IsNullOrEmpty(toolKey)) return toolKey;
+        // 其次最早活跃的手动/自动强占
+        return _bindings.Where(kv => kv.Value.Preemptive)
+                         .OrderBy(kv => kv.Value.LastActive).FirstOrDefault().Key;
+    }
+
+    /// <summary>标记 key 为 Tool 链锁定（SmartScheduler 调用，驱逐优先级用）。</summary>
+    public void MarkToolLocked(string key)
+    {
+        lock (_gate) { _toolLockedKeys.Add(key); }
+    }
+
+    /// <summary>取消 Tool 链锁定标记（SmartScheduler 调用）。</summary>
+    public void UnmarkToolLocked(string key)
+    {
+        lock (_gate) { _toolLockedKeys.Remove(key); }
     }
 
     /// <summary>指定 Key 当前是否为强占（Tool 链锁定判定用）。</summary>
