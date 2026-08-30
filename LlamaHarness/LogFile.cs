@@ -1,31 +1,35 @@
-using System.Text;
-
 namespace LlamaHarness;
 
 /// <summary>
-/// UI 日志文件持久化 + 自动轮切 + 警告/错误独立输出：
-/// - harness.log：全部日志，超 2MB 自动轮切为 harness.log.1（保留一代备份）
-/// - warn_error.log：警告/错误每条独立成块，附带该条之前 10 条日志作上下文，便于排查
+/// UI 日志文件持久化薄门面（统一异步日志管道）：
+/// - harness.log：全部日志；warn_error.log：警告/错误独立成块（附该条之前 10 条上下文）；slot.log / request_dump.log 独立流
+/// - 生产侧 Enqueue 即返回（一次 lock，零编码/分类/磁盘）；单后台写线程批量消费 + 双阈值 Flush + 轮切（LogPipeline）
+/// - _recent 环形缓冲在生产侧更新（SnapshotRecent UI 行为与旧实现一致）
 /// 线程安全、尽力而为（永不抛出）。
 /// </summary>
 public static class LogFile
 {
-    private static readonly object _gate = new();
+    private static readonly object _recentGate = new();
 
     /// <summary>日志目录：项目目录下 logs/（写入器首次打开时自动创建）。</summary>
     internal static string LogDir => Path.Combine(AppContext.BaseDirectory, "logs");
 
-    /// <summary>主日志大小上限（字节）。</summary>
-    private const long MaxLogBytes = 2_000_000;
+    /// <summary>最近 N 条带时间戳日志（生产侧更新），供警告/错误块与 /__status__ recent_logs。</summary>
+    private static readonly Queue<string> _recent = new();
 
-    /// <summary>警告/错误日志大小上限（字节）。</summary>
-    private const long MaxWarnBytes = 5_000_000;
-
-    /// <summary>警告/错误块附带的前置日志条数。</summary>
+    /// <summary>warn_error 块附带的前置日志条数。</summary>
     private const int ContextLines = 10;
 
-    /// <summary>最近 N 条带时间戳日志（环形缓冲），供警告/错误块提供上下文。</summary>
-    private static readonly Queue<string> _recent = new();
+    private static readonly Lazy<LogPipeline> _pipeline =
+        new(() => new LogPipeline(LogDir, QueueFullPolicy.DropNewest), true);
+
+    /// <summary>设置队列满丢弃策略（运行时生效，UI 配置页）。</summary>
+    public static void Configure(QueueFullPolicy policy)
+    {
+        _pipeline.Value.Queue.Policy = policy;
+    }
+
+    public enum Level { Info, Warn, Error }
 
     /// <summary>llama-server 输出严重度标记：时间戳前缀后跟 I/W/E（如 "0.38.265.840 E srv ..."）。</summary>
     private static readonly System.Text.RegularExpressions.Regex SeverityRe =
@@ -42,8 +46,6 @@ public static class LogFile
     /// <summary>llama.cpp 已知良性噪声（3.3 日志标准化）：剪枝/合并模型残留的 unused tensor 警告——不进告警流，仅写主日志。</summary>
     private static readonly System.Text.RegularExpressions.Regex UnusedTensorRe =
         new(@"model has unused tensor blk\.\d+", System.Text.RegularExpressions.RegexOptions.Compiled);
-
-    public enum Level { Info, Warn, Error }
 
     /// <summary>日志级别分类（中英双语）：
     /// 0. 已知良性噪声（unused tensor）→ Info（不写 warn_error.log）；
@@ -68,104 +70,74 @@ public static class LogFile
         return Level.Info;
     }
 
-    /// <summary>最近日志快照（/__status__ 的 recent_logs 数据源；锁内复制，含全部 harness 侧日志）。</summary>
+    /// <summary>最近日志快照（/__status__ 的 recent_logs 数据源；生产侧更新，含全部 harness 侧日志）。</summary>
     public static string[] SnapshotRecent()
     {
-        lock (_gate)
+        lock (_recentGate)
         {
             return _recent.ToArray();
         }
     }
 
-    /// <summary>追加一行日志（可来自任意线程）：写主日志 + 按级别写警告/错误日志。</summary>
+    /// <summary>追加一行日志（可来自任意线程）：捕获 Utc 时间戳 + 更新 _recent + Enqueue（即返回，零磁盘）。
+    /// warn_error 派生块由写线程按 Classify 结果生成（上下文 = 该条之前 10 条）。</summary>
     public static void Append(string line)
     {
-        lock (_gate)
+        try
         {
-            try
+            var utc = DateTime.UtcNow;
+            var stamped = LogPipeline.FormatLine(utc, line);
+            lock (_recentGate)
             {
-                var stamped = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {line}";
-                AppendMain(stamped);
-                var lvl = Classify(line);
-                if (lvl != Level.Info)
-                    AppendWarnError(lvl, stamped);
-                // 维护上下文环形缓冲（当前行未入队前，_recent 即"该条之前 10 条"）
                 _recent.Enqueue(stamped);
                 while (_recent.Count > ContextLines) _recent.Dequeue();
             }
-            catch
-            {
-                // 尽力而为：磁盘满/权限等问题不影响主流程
-            }
+            _pipeline.Value.Enqueue(LogStream.Main, utc, line);
         }
-    }
-
-    // ==================== E-6：常驻 StreamWriter 批量写 ====================
-
-    /// <summary>三个日志文件的常驻写入器（懒打开，缓冲写）。</summary>
-    private static readonly LogStreamWriter _mainWriter = new(Path.Combine(AppContext.BaseDirectory, "logs", "harness.log"));
-    private static readonly LogStreamWriter _warnWriter = new(Path.Combine(AppContext.BaseDirectory, "logs", "warn_error.log"));
-    private static readonly LogStreamWriter _slotWriter = new(Path.Combine(AppContext.BaseDirectory, "logs", "slot.log"));
-
-    /// <summary>150ms 周期 Flush 定时器（与 UI 防抖同节奏）：批量落盘，替代旧实现每行 open/write/close。</summary>
-    private static readonly System.Threading.Timer _flushTimer = new(OnFlushTick, null, 150, 150);
-
-    private static void OnFlushTick(object? _)
-    {
-        lock (_gate)
+        catch
         {
-            _mainWriter.Flush();
-            _warnWriter.Flush();
-            _slotWriter.Flush();
+            // 尽力而为：不影响主流程
         }
     }
 
-    /// <summary>进程退出时调用：Flush + 关闭全部写入器（防缓冲丢失/句柄泄漏）。</summary>
-    public static void Shutdown()
-    {
-        lock (_gate)
-        {
-            _flushTimer.Dispose();
-            _mainWriter.Dispose();
-            _warnWriter.Dispose();
-            _slotWriter.Dispose();
-        }
-    }
-
-    /// <summary>追加一行槽位日志（可来自任意线程）：独立写入 logs/slot.log，超 2MB 轮切。用于绑定/驱逐/KV Cache 事件追溯。</summary>
+    /// <summary>追加一行槽位日志（可来自任意线程）：独立流 slot.log，超 2MB 轮切。用于绑定/驱逐/KV Cache 事件追溯。</summary>
     public static void SlotAppend(string line)
     {
-        lock (_gate)
+        try
         {
-            try
-            {
-                var stamped = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {line}";
-                if (_slotWriter.RotateIfNeeded(MaxLogBytes)) { /* 已轮切，下条自动重开 */ }
-                _slotWriter.Write(stamped + Environment.NewLine);
-            }
-            catch
-            {
-                // 尽力而为：磁盘满/权限等问题不影响主流程
-            }
+            _pipeline.Value.Enqueue(LogStream.Slot, DateTime.UtcNow, line);
+        }
+        catch
+        {
+            // 尽力而为
         }
     }
 
-    /// <summary>写主日志 logs/harness.log，超限时轮切为 harness.log.1。（调用方已持 _gate）</summary>
-    private static void AppendMain(string stampedLine)
+    /// <summary>追加请求 dump 块（可来自任意线程）：独立流 request_dump.log（多行块作为单条消息，保留块内结构）。</summary>
+    public static void DumpAppend(string block)
     {
-        if (_mainWriter.RotateIfNeeded(MaxLogBytes)) { /* 已轮切 */ }
-        _mainWriter.Write(stampedLine + Environment.NewLine);
+        try
+        {
+            _pipeline.Value.Enqueue(LogStream.Dump, DateTime.UtcNow, block);
+        }
+        catch
+        {
+            // 尽力而为
+        }
     }
 
-    /// <summary>写警告/错误日志 logs/warn_error.log：前 10 条上下文 + 分隔标记 + 本条。（调用方已持 _gate）</summary>
-    private static void AppendWarnError(Level lvl, string stampedLine)
+    /// <summary>进程退出时调用：drain 队列 + 最终 Flush（3s 超时；超时返回剩余行数）。</summary>
+    public static void Shutdown()
     {
-        if (_warnWriter.RotateIfNeeded(MaxWarnBytes)) { /* 已轮切 */ }
-        var sb = new System.Text.StringBuilder();
-        foreach (var l in _recent)
-            sb.Append(l).Append(Environment.NewLine);
-        sb.Append($"===== {lvl} =====").Append(Environment.NewLine);
-        sb.Append(stampedLine).Append(Environment.NewLine);
-        _warnWriter.Write(sb.ToString());
+        try
+        {
+            var (completed, remaining) = _pipeline.Value.Shutdown();
+            if (!completed)
+                System.Diagnostics.Debug.WriteLine($"[LOG-PIPE] shutdown drain timeout, remain {remaining} lines lost");
+        }
+        catch
+        {
+            // 尽力而为
+        }
     }
 }

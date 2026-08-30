@@ -70,6 +70,8 @@ public class AppConfig
     public string AutoSnapshotKeys { get; set; } = "trae_global";
     /// <summary>请求体 dump 开关（应用识别分析用）：每个 POST 的原始 body + headers 落盘 request_dump.log。默认关闭——防 prompt 隐私落盘与无谓 IO（审计 O-18）。</summary>
     public bool RequestDumpEnabled { get; set; } = false;
+    /// <summary>日志管道队列满丢弃策略：DropNewest = 保留历史、丢新入队（默认——排查更看重最早异常源头）；DropOldest = 丢最旧、保留新消息。</summary>
+    public QueueFullPolicy LogQueueFullPolicy { get; set; } = QueueFullPolicy.DropNewest;
 
     /// <summary>配置文件路径：项目目录下 config/config.json。</summary>
     private static string ConfigPath => Path.Combine(AppContext.BaseDirectory, "config", "config.json");

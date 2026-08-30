@@ -58,6 +58,7 @@ public class MainForm : Form
     private readonly TextBox _txtSpecType = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White, BorderStyle = BorderStyle.None };
     private readonly NumericUpDown _numSpecDraftNMax = new() { Minimum = 0, Maximum = 8, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
     private readonly CheckBox _chkRequestDump = new() { Text = "request-dump（dump 所有请求到 logs/request_dump.log）", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
+    private readonly ComboBox _cmbLogQueuePolicy = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList, ForeColor = Color.White };
     private readonly NumericUpDown _numBatchThreads = new() { Minimum = 0, Maximum = 512, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
     // §4.2 自动强占（冻结防驱逐）：按应用类型前缀，勾选 → 该类型绑定强制 Preemptive=true
     private readonly CheckBox _chkAutoPreDshRule = new() { Text = "DSH规则", AutoSize = true, ForeColor = Color.FromArgb(200, 200, 200) };
@@ -212,6 +213,7 @@ public class MainForm : Form
 
         BuildUi();
         LoadConfigToUi();
+        LogFile.Configure(_config.LogQueueFullPolicy); // 异步日志管道队列满策略（立即生效）
         UpdatePortControlState(); // 智能模式下监听器占用端口，禁止编辑
         WireEvents();
 
@@ -1472,6 +1474,9 @@ public class MainForm : Form
         AddRow("spec-type:", _txtSpecType, null);
         AddRow("spec-draft-n-max:", _numSpecDraftNMax, null);
         AddRow("request-dump:", _chkRequestDump, null);
+        _cmbLogQueuePolicy.Items.Add("drop-newest（保留历史，丢新入队）");
+        _cmbLogQueuePolicy.Items.Add("drop-oldest（丢最旧，保留新消息）");
+        AddRow("log-queue-full:", _cmbLogQueuePolicy, null);
         AddRow("tb(batch线程):", _numBatchThreads, null);
         AddRow("附加:", _txtExtra, null);
         AddRow("休眠(min):", _numIdleMin, null);
@@ -1520,6 +1525,7 @@ public class MainForm : Form
         _tooltip.SetToolTip(_txtSpecType, "投机解码类型（--spec-type）：draft-mtp = MTP draft 模型，decode 提速 2~3 倍；留空 = 禁用。");
         _tooltip.SetToolTip(_numSpecDraftNMax, "每轮投机 draft token 数（--spec-draft-n-max）：0 = 不拼接该参数。");
         _tooltip.SetToolTip(_chkRequestDump, "勾选后 dump 所有请求体 + headers 到 logs/request_dump.log（应用识别分析用）；不勾选 = 关闭。");
+        _tooltip.SetToolTip(_cmbLogQueuePolicy, "日志管道队列满（50k 行）时的丢弃策略：drop-newest = 保留历史日志、丢新入队（默认，排查更看重最早异常源头）；drop-oldest = 丢最旧、保留新消息。");
         _tooltip.SetToolTip(_numBatchThreads, "batch 阶段 CPU 线程数（--tb）：prefill 分词/调度辅助加速；0 = 不拼接。");
         _tooltip.SetToolTip(_chkAutoPreDshRule, "勾选后 DSH 规则引擎会话（dsh_rule_*）槽位自动强占：空闲不被 LRU 驱逐，再次提问零 Prefill 开销。");
         _tooltip.SetToolTip(_chkAutoPreWebui, "勾选后 WebUI 会话（webui_*）槽位自动强占：空闲不被 LRU 驱逐。");
@@ -1589,6 +1595,7 @@ public class MainForm : Form
         _txtSpecType.Text = cfg.SpecType;
         _numSpecDraftNMax.Value = Math.Clamp(cfg.SpecDraftNMax, (int)_numSpecDraftNMax.Minimum, (int)_numSpecDraftNMax.Maximum);
         _chkRequestDump.Checked = cfg.RequestDumpEnabled;
+        _cmbLogQueuePolicy.SelectedIndex = cfg.LogQueueFullPolicy == QueueFullPolicy.DropOldest ? 1 : 0;
         _numBatchThreads.Value = Math.Clamp(cfg.BatchThreads, (int)_numBatchThreads.Minimum, (int)_numBatchThreads.Maximum);
         _txtExtra.Text = cfg.ExtraArgs;
         _chkAuto.Checked = cfg.AutoMode;
@@ -1639,6 +1646,9 @@ public class MainForm : Form
         _config.SpecType = _txtSpecType.Text.Trim();
         _config.SpecDraftNMax = (int)_numSpecDraftNMax.Value;
         _config.RequestDumpEnabled = _chkRequestDump.Checked;
+        var logPolicy = _cmbLogQueuePolicy.SelectedIndex == 1 ? QueueFullPolicy.DropOldest : QueueFullPolicy.DropNewest;
+        _config.LogQueueFullPolicy = logPolicy;
+        LogFile.Configure(logPolicy); // 运行时立即生效
         _config.BatchThreads = (int)_numBatchThreads.Value;
         _config.ExtraArgs = _txtExtra.Text.Trim();
         _config.AutoMode = _chkAuto.Checked;
@@ -1754,6 +1764,7 @@ public class MainForm : Form
         _txtSpecType.TextChanged += OnParamEdited;
         _numSpecDraftNMax.ValueChanged += OnParamEdited;
         _chkRequestDump.CheckedChanged += OnParamEdited;
+        _cmbLogQueuePolicy.SelectedIndexChanged += OnParamEdited;
         _numBatchThreads.ValueChanged += OnParamEdited;
         _chkAutoPreDshRule.CheckedChanged += OnParamEdited;
         _chkAutoPreWebui.CheckedChanged += OnParamEdited;

@@ -1517,13 +1517,13 @@ public sealed class SmartScheduler : IDisposable
         }
     }
 
-    /// <summary>请求体 dump（应用识别分析用）：原始 body + headers 落盘到 request_dump.log。</summary>
+    /// <summary>请求体 dump（应用识别分析用）：原始 body + headers 入统一日志管道 Dump 流（request_dump.log，2MB 轮切）。
+    /// 时间戳由管道 Enqueue 侧统一添加（秒级精度）。</summary>
     private void DumpRequest(HttpListenerContext ctx, byte[] bodyBytes)
     {
         try
         {
             var req = ctx.Request;
-            var ts = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
             var path = req.Url?.AbsolutePath ?? "";
             var bodyStr = System.Text.Encoding.UTF8.GetString(bodyBytes);
 
@@ -1537,21 +1537,11 @@ public sealed class SmartScheduler : IDisposable
             if (bodyStr.Length > DumpBodyMaxLength)
                 bodyStr = bodyStr.Substring(0, DumpBodyMaxLength) + $"...(truncated, total {System.Text.Encoding.UTF8.GetByteCount(bodyStr)} bytes)";
 
-            var dumpLine = $"[{ts}] POST {path}\n--- Headers ---\n{headers}--- Body ---\n{bodyStr}\n{new string('=', 80)}\n\n";
-            lock (_dumpLock)
-            {
-                var logDir = System.IO.Path.Combine(AppContext.BaseDirectory, "logs");
-                if (!System.IO.Directory.Exists(logDir)) System.IO.Directory.CreateDirectory(logDir);
-                using var sw = new StreamWriter(new FileStream(
-                    System.IO.Path.Combine(logDir, "request_dump.log"),
-                    FileMode.Append, FileAccess.Write));
-                sw.Write(dumpLine);
-            }
+            var dumpBlock = $"POST {path}\n--- Headers ---\n{headers}--- Body ---\n{bodyStr}\n{new string('=', 80)}\n\n";
+            LogFile.DumpAppend(dumpBlock); // 异步管道：请求路径零磁盘 I/O
         }
         catch { /* dump 失败不影响主流程 */ }
     }
-
-    private readonly object _dumpLock = new(); // 实例字段：与其余锁风格统一（单实例调度器，无需 static）
 
     /// <summary>判断是否为真实推理请求（刷新闲置计时）：POST + completions/embeddings 路径。</summary>
     private static bool IsInferenceRequest(HttpListenerRequest req)
