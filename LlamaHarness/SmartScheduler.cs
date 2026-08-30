@@ -123,6 +123,10 @@ public sealed class SmartScheduler : IDisposable
     /// <summary>本进程运行以来已服务过的亲和 key（唤醒时清空）：「进程重启后该 key 首次使用 → restore KV 自愈」判定依据，
     /// 防止进程存活期间误用磁盘旧快照回退内存中更新的槽位状态。</summary>
     private readonly HashSet<string> _servedKeysThisRun = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>本唤醒周期内已完成「首请求存档」的 autoPre key（唤醒时清空）：
+    /// autoPre key 首次真实 prefill 完成后立即落盘快照（1.1 修复），防进程崩溃未休眠时磁盘快照停留在旧状态。
+    /// 每周期只存一次；后续增量 KV 仍由休眠前 save 兜底最终态。</summary>
+    private readonly HashSet<string> _savedKeysThisRun = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>休眠静默观察期进行中标志（_sleepGate 保护）：防闲置定时器重复触发休眠流程。</summary>
     private bool _sleepPreparing;
 
@@ -484,8 +488,8 @@ public sealed class SmartScheduler : IDisposable
             if (_kvCache != null)
                 Log?.Invoke($"KV Cache 持久化已启用：路径 {_cfg.KvCachePath}（驱逐自动 save，重绑定自动 restore，休眠前自动 save，唤醒后自动 restore）。");
 
-            // 新进程槽位 KV 全空：清空「本轮已服务」标记 → 唤醒后各 key 首次请求触发 restore 自愈（跳过全量 prefill）
-            lock (_kvStateGate) _servedKeysThisRun.Clear();
+            // 新进程槽位 KV 全空：清空「本轮已服务」+「首请求存档」标记 → 唤醒后各 key 首次请求触发 restore 自愈（跳过全量 prefill），autoPre key 重新触发首请求存档
+            lock (_kvStateGate) { _servedKeysThisRun.Clear(); _savedKeysThisRun.Clear(); }
 
             await WaitReadyAsync(srvPort);
 
@@ -878,6 +882,29 @@ public sealed class SmartScheduler : IDisposable
                         catch { /* 清理失败不影响主流程 */ }
                     }
                 }
+
+                // 1.1 首请求存档：autoPre key 首次真实 prefill 完成后立即落盘快照（每唤醒周期一次），
+                // 防进程崩溃未休眠时磁盘快照停留在旧状态（缺最新 KV）。失败不阻塞主流程，下请求重试。
+                if (completed && routedKey != null && _kvCache != null && routedSlot is int saveSlot
+                    && IsAutoPreKey(routedKey))
+                {
+                    bool alreadySaved;
+                    lock (_kvStateGate) alreadySaved = _savedKeysThisRun.Contains(routedKey);
+                    if (!alreadySaved)
+                    {
+                        var swSave = System.Diagnostics.Stopwatch.StartNew();
+                        try
+                        {
+                            await _kvCache.SaveAsync(saveSlot, routedKey);
+                            lock (_kvStateGate) _savedKeysThisRun.Add(routedKey);
+                            Log?.Invoke($"[KV-SAVE] 首请求存档：{routedKey} → slot{saveSlot}（{swSave.Elapsed.TotalSeconds:F1}s）");
+                        }
+                        catch (Exception ex)
+                        {
+                            Log?.Invoke($"[KV-SAVE] 首请求存档失败：{routedKey} → slot{saveSlot}（{ex.Message}），下次请求重试。");
+                        }
+                    }
+                }
             }
             catch (Exception)
             {
@@ -996,6 +1023,12 @@ public sealed class SmartScheduler : IDisposable
     {
         return _cfg.AutoPreemptiveApps.Split(',', StringSplitOptions.RemoveEmptyEntries)
             .Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
+    }
+
+    /// <summary>判定亲和 key 是否匹配任一自动强占前缀（1.1 首请求存档条件，public 供测试）。</summary>
+    public bool IsAutoPreKey(string key)
+    {
+        return ParseAutoPreemptivePrefixes().Any(p => key.StartsWith(p, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>§4.5 Tool 链检测：messages 末条 role=tool → agent 工具循环进行中（框架刚回填 tool_result、等待模型响应）。
