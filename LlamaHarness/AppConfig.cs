@@ -35,8 +35,6 @@ public class AppConfig
     public string SpecType { get; set; } = "draft-mtp";
     /// <summary>每轮投机 draft token 数（--spec-draft-n-max）：0 = 不拼接该参数。</summary>
     public int SpecDraftNMax { get; set; } = 2;
-    /// <summary>请求级 KV 前缀复用底层开关（--cache-req）：显式开启防默认变更；关闭后 restore 完全失效。</summary>
-    public bool CacheReq { get; set; } = true;
     /// <summary>batch 阶段 CPU 线程数（--tb）：prefill 分词/调度辅助加速；0 = 不拼接。</summary>
     public int BatchThreads { get; set; } = 0;
     /// <summary>附加参数：原样拼入命令行（不做再解析）；含空格的路径需自行加引号，如 --mmproj "D:\a b\projector.gguf"。</summary>

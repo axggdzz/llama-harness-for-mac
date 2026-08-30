@@ -29,7 +29,6 @@ public class LaunchArgsTests
         Assert.Contains("--flash-attn on", args);
         Assert.Contains("--spec-type draft-mtp", args);
         Assert.Contains("--spec-draft-n-max 2", args);
-        Assert.Contains("--cache-req", args);
         // 默认 BatchThreads=0：不拼 --tb
         Assert.DoesNotContain("--tb", args);
         // 默认 NoKvUnified=false：kv-unified 开启，不拼 --no-kv-unified
@@ -43,15 +42,6 @@ public class LaunchArgsTests
         cfg.BatchThreads = 12;
         var args = LlamaFinder.BuildArgs(cfg);
         Assert.Contains("--tb 12", args);
-    }
-
-    [Fact]
-    public void CacheReq_Disabled_OmitsCacheReq()
-    {
-        var cfg = DefaultCfg();
-        cfg.CacheReq = false;
-        var args = LlamaFinder.BuildArgs(cfg);
-        Assert.DoesNotContain("--cache-req", args);
     }
 
     [Fact]

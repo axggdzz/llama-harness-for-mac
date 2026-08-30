@@ -49,7 +49,7 @@ public class MainForm : Form
     private readonly NumericUpDown _numContTimeout = new() { Minimum = 30, Maximum = 3600, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
     private readonly CheckBox _chkCrashRecover = new() { Text = "bad_alloc 自动恢复（快照接续/重放）", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
     private readonly NumericUpDown _numMaxRestarts = new() { Minimum = 0, Maximum = 10, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
-    // Prefill 吞吐参数（阶段二调优：ubatch/batch/KV 量化/flash-attn/投机解码/cache-req/batch 线程）
+    // Prefill 吞吐参数（阶段二调优：ubatch/batch/KV 量化/flash-attn/投机解码/batch 线程）
     private readonly TextBox _txtLoadMode = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White, BorderStyle = BorderStyle.None };
     private readonly NumericUpDown _numUbatch = new() { Minimum = 1, Maximum = 65536, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
     private readonly NumericUpDown _numBatch = new() { Minimum = 1, Maximum = 65536, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
@@ -57,7 +57,7 @@ public class MainForm : Form
     private readonly CheckBox _chkFlashAttn = new() { Text = "--flash-attn", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
     private readonly TextBox _txtSpecType = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White, BorderStyle = BorderStyle.None };
     private readonly NumericUpDown _numSpecDraftNMax = new() { Minimum = 0, Maximum = 8, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
-    private readonly CheckBox _chkCacheReq = new() { Text = "--cache-req", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
+    private readonly CheckBox _chkRequestDump = new() { Text = "request-dump（dump 所有请求到 logs/request_dump.log）", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
     private readonly NumericUpDown _numBatchThreads = new() { Minimum = 0, Maximum = 512, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
     // §4.2 自动强占（冻结防驱逐）：按应用类型前缀，勾选 → 该类型绑定强制 Preemptive=true
     private readonly CheckBox _chkAutoPreDshRule = new() { Text = "DSH规则", AutoSize = true, ForeColor = Color.FromArgb(200, 200, 200) };
@@ -1411,14 +1411,15 @@ public class MainForm : Form
         // 文字框白字（禁用时也保持白字，清晰）+ CheckBox 勾改黑
         foreach (var c in new[] { _txtExe, _txtModel, _txtExtra, _txtPcoreMask, _txtKvCachePath, _txtLoadMode, _txtCacheTypeKv, _txtSpecType })
             if (c is TextBox tb) tb.ForeColor = Color.White;
-        foreach (var c in new[] { _chkNoKv, _chkAuto, _chkForceStream, _chkTokenGuard, _chkContinuation, _chkCrashRecover, _chkFlashAttn, _chkCacheReq, _chkAutoPreDshRule, _chkAutoPreWebui, _chkAutoPreTrae, _chkAutoPreDshAgent })
+        foreach (var c in new[] { _chkNoKv, _chkAuto, _chkForceStream, _chkTokenGuard, _chkContinuation, _chkCrashRecover, _chkFlashAttn, _chkRequestDump, _chkAutoPreDshRule, _chkAutoPreWebui, _chkAutoPreTrae, _chkAutoPreDshAgent })
             ApplyBlackCheck(c);
 
         var panel = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Top,
             ColumnCount = 3,
             AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             BackColor = Color.Transparent,
             Margin = new Padding(0, 0, 0, 6),
         };
@@ -1464,7 +1465,7 @@ public class MainForm : Form
         AddRow("flash-attn:", _chkFlashAttn, null);
         AddRow("spec-type:", _txtSpecType, null);
         AddRow("spec-draft-n-max:", _numSpecDraftNMax, null);
-        AddRow("cache-req:", _chkCacheReq, null);
+        AddRow("request-dump:", _chkRequestDump, null);
         AddRow("tb(batch线程):", _numBatchThreads, null);
         AddRow("附加:", _txtExtra, null);
         AddRow("休眠(min):", _numIdleMin, null);
@@ -1506,7 +1507,7 @@ public class MainForm : Form
         _tooltip.SetToolTip(_chkFlashAttn, "Flash Attention（--flash-attn on）：prefill 速度核心开关，必开。");
         _tooltip.SetToolTip(_txtSpecType, "投机解码类型（--spec-type）：draft-mtp = MTP draft 模型，decode 提速 2~3 倍；留空 = 禁用。");
         _tooltip.SetToolTip(_numSpecDraftNMax, "每轮投机 draft token 数（--spec-draft-n-max）：0 = 不拼接该参数。");
-        _tooltip.SetToolTip(_chkCacheReq, "请求级 KV 前缀复用底层开关（--cache-req）：显式开启防默认变更；关闭后 restore 完全失效。");
+        _tooltip.SetToolTip(_chkRequestDump, "勾选后 dump 所有请求体 + headers 到 logs/request_dump.log（应用识别分析用）；不勾选 = 关闭。");
         _tooltip.SetToolTip(_numBatchThreads, "batch 阶段 CPU 线程数（--tb）：prefill 分词/调度辅助加速；0 = 不拼接。");
         _tooltip.SetToolTip(_chkAutoPreDshRule, "勾选后 DSH 规则引擎会话（dsh_rule_*）槽位自动强占：空闲不被 LRU 驱逐，再次提问零 Prefill 开销。");
         _tooltip.SetToolTip(_chkAutoPreWebui, "勾选后 WebUI 会话（webui_*）槽位自动强占：空闲不被 LRU 驱逐。");
@@ -1571,7 +1572,7 @@ public class MainForm : Form
         _chkFlashAttn.Checked = cfg.FlashAttn;
         _txtSpecType.Text = cfg.SpecType;
         _numSpecDraftNMax.Value = Math.Clamp(cfg.SpecDraftNMax, (int)_numSpecDraftNMax.Minimum, (int)_numSpecDraftNMax.Maximum);
-        _chkCacheReq.Checked = cfg.CacheReq;
+        _chkRequestDump.Checked = cfg.RequestDumpEnabled;
         _numBatchThreads.Value = Math.Clamp(cfg.BatchThreads, (int)_numBatchThreads.Minimum, (int)_numBatchThreads.Maximum);
         _txtExtra.Text = cfg.ExtraArgs;
         _chkAuto.Checked = cfg.AutoMode;
@@ -1615,7 +1616,7 @@ public class MainForm : Form
         _config.FlashAttn = _chkFlashAttn.Checked;
         _config.SpecType = _txtSpecType.Text.Trim();
         _config.SpecDraftNMax = (int)_numSpecDraftNMax.Value;
-        _config.CacheReq = _chkCacheReq.Checked;
+        _config.RequestDumpEnabled = _chkRequestDump.Checked;
         _config.BatchThreads = (int)_numBatchThreads.Value;
         _config.ExtraArgs = _txtExtra.Text.Trim();
         _config.AutoMode = _chkAuto.Checked;
@@ -1724,7 +1725,7 @@ public class MainForm : Form
         _chkFlashAttn.CheckedChanged += OnParamEdited;
         _txtSpecType.TextChanged += OnParamEdited;
         _numSpecDraftNMax.ValueChanged += OnParamEdited;
-        _chkCacheReq.CheckedChanged += OnParamEdited;
+        _chkRequestDump.CheckedChanged += OnParamEdited;
         _numBatchThreads.ValueChanged += OnParamEdited;
         _chkAutoPreDshRule.CheckedChanged += OnParamEdited;
         _chkAutoPreWebui.CheckedChanged += OnParamEdited;

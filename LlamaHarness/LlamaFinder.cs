@@ -66,7 +66,7 @@ public static class LlamaFinder
     /// 拼接 llama-server 完整命令行参数。
     /// 模板：-m &lt;model&gt; --port &lt;p&gt; -c &lt;c&gt; -ngl &lt;n&gt; --parallel &lt;np&gt; [--no-kv-unified] -t &lt;t&gt;
     ///       [--load-mode] [--ubatch-size] [--batch-size] [--cache-type-k/v] [--flash-attn on]
-    ///       [--spec-type ... --spec-draft-n-max N] [--cache-req] [--tb N] [附加参数]
+    ///       [--spec-type ... --spec-draft-n-max N] [--tb N] [附加参数]
     /// portOverride 用于智能模式下后端端口（前端端口 + 1）；
     /// threadsOverride 用于 P 核掩码生效时钳制线程数（防超订）。
     /// 附加参数原样拼入（不做再解析），含空格的值需用户自行加引号，见 AppConfig.ExtraArgs。
@@ -107,8 +107,6 @@ public static class LlamaFinder
             if (cfg.SpecDraftNMax > 0)
                 sb.Append($" --spec-draft-n-max {cfg.SpecDraftNMax}");
         }
-        if (cfg.CacheReq)
-            sb.Append(" --cache-req");
         if (cfg.BatchThreads > 0)
             sb.Append($" --tb {cfg.BatchThreads}");
         if (!string.IsNullOrWhiteSpace(cfg.ExtraArgs))
