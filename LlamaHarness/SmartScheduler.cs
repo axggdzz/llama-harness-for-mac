@@ -22,12 +22,16 @@ public sealed class SmartScheduler : IDisposable
     private readonly AppConfig _cfg;
     private readonly LlamaServerProcess _server = new();
     // 代理用 HttpClient：推理请求可能很长，禁用客户端超时。
-    // Connection: close —— 不复用池化 keep-alive 连接：llama-server 会关闭空闲连接、
-    // 休眠/唤醒后旧端口残留死连接，复用都会报 "An error occurred while sending the request."
-    private readonly HttpClient _hc = new()
+    // E-7：keep-alive + 池化连接寿命上限（替代 Connection: close）：
+    // 休眠/唤醒后残留的死连接由 PooledConnectionLifetime 自然过期淘汰；
+    // 偶发死连接命中时由 SendAndPipeAsync 的 500ms 重试兜底。
+    private readonly HttpClient _hc = new(new SocketsHttpHandler
+    {
+        PooledConnectionLifetime = TimeSpan.FromSeconds(30),
+        PooledConnectionIdleTimeout = TimeSpan.FromSeconds(60),
+    })
     {
         Timeout = System.Threading.Timeout.InfiniteTimeSpan,
-        DefaultRequestHeaders = { { "Connection", "close" } },
     };
     private readonly HttpListener _listener = new();
     private readonly System.Threading.Timer _tickTimer;

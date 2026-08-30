@@ -176,6 +176,8 @@ public class MainForm : Form
     private Control[] _paramControls;
     // —— 槽位管理表 key→行索引（审计：原实现每轮刷新线性扫 Tag，O(n²)）——
     private readonly Dictionary<string, int> _slotMgmtRowIdx = new(StringComparer.Ordinal);
+    // —— stats 表 id→行索引（E-10：对齐 _slotMgmtRowIdx 模式，替代 FindStatRow 线性扫 Tag）——
+    private readonly Dictionary<long, DataGridViewRow> _statsRowIdx = new();
     // —— 槽位日志（槽位绑定页下方，独立持久化 slot.log）——
     private RichTextBox _txtSlotLog;
 
@@ -1974,6 +1976,7 @@ public class MainForm : Form
                 int idx = _gridStats.Rows.Add();
                 row = _gridStats.Rows[idx];
                 row.Tag = s.Id;
+                _statsRowIdx[s.Id] = row; // E-10：索引登记
             }
             if (row != null)
                 FillStatRow(row, s);
@@ -1992,7 +1995,10 @@ public class MainForm : Form
         {
             var row = FindStatRow(s.Id);
             if (row != null)
+            {
                 _gridStats.Rows.Remove(row);
+                _statsRowIdx.Remove(s.Id); // E-10：索引同步移除
+            }
             UpdateSummary(); // 行被淘汰后刷新汇总，保持请求数/合计与表格一致
         });
     }
@@ -2004,17 +2010,15 @@ public class MainForm : Form
         BeginInvoke(() =>
         {
             _gridStats.Rows.Clear();
+            _statsRowIdx.Clear(); // E-10：索引同步清空
             _lblSummary.Text = "请求: 0";
         });
     }
 
+    /// <summary>E-10：字典 O(1) 查找（替代原线性扫 Tag）。</summary>
     private DataGridViewRow? FindStatRow(long id)
     {
-        foreach (DataGridViewRow r in _gridStats.Rows)
-        {
-            if (r.Tag is long tag && tag == id) return r;
-        }
-        return null;
+        return _statsRowIdx.TryGetValue(id, out var r) ? r : null;
     }
 
     private static void FillStatRow(DataGridViewRow row, LlamaStatsParser.RoundStats s)
@@ -2164,9 +2168,9 @@ public class MainForm : Form
 
         try
         {
-            // 一次批量 AppendText（减少重绘）
-            foreach (var (_, entry) in batch)
-                _txtLog.AppendText(entry);
+            // E-9：全部 entry 拼接后单次 AppendText（替代 N 次独立追加，减少布局触发/重绘）
+            var all = string.Concat(batch.Select(b => b.entry));
+            _txtLog.AppendText(all);
 
             // 字符上限截断
             if (_txtLog.TextLength > MaxLogChars)

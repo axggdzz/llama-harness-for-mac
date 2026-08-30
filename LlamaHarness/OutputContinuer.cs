@@ -167,7 +167,6 @@ public static class OutputContinuer
         SemaphoreSlim? writeGate = null)
     {
         var stream = resp.Content.ReadAsStream();
-        var pending = new List<byte>(65536);
         var held = new List<string>();      // finish_reason 之后暂扣的原始行（含 [DONE]）
         string? finalPayload = null;        // 含 finish_reason 的最后 chunk JSON
         string? finalReason = null;
@@ -175,31 +174,45 @@ public static class OutputContinuer
         bool sawDone = false;
         var chunk = new byte[8192];
 
-        // 单遍扫描：只从上次扫描位置继续找换行，行处理完批量移除头部（原实现每找到一行就 RemoveRange+从头重扫，O(n²)）
-        int lineStart = 0;   // 当前未处理行的起始下标
-        int scanFrom = 0;    // 下一轮扫描起点（上次扫描到的位置）
+        // E-8：byte[] + 已处理偏移游标（替代 List<byte> + RemoveRange）：
+        // 游标只前移不搬字节；已处理量超 64KB 时一次性 Array.Copy 压实、偏移归零。
+        var buf = new byte[65536];
+        int len = 0;          // buf 中总字节数
+        int lineStart = 0;    // 当前未处理行的起始偏移
+        int scanFrom = 0;     // 下一轮扫描起点（上次扫描到的位置）
         while (true)
         {
             int n = await stream.ReadAsync(chunk);
             if (n <= 0) break;
-            for (int j = 0; j < n; j++) pending.Add(chunk[j]);
-            for (int i = scanFrom; i < pending.Count; i++)
+            if (len + n > buf.Length)
             {
-                if (pending[i] != (byte)'\n') continue;
-                var line = DecodeLine(pending, lineStart, i);
+                var nb = new byte[Math.Max(buf.Length * 2, len + n)];
+                Array.Copy(buf, nb, len);
+                buf = nb;
+            }
+            Array.Copy(chunk, 0, buf, len, n);
+            len += n;
+            // 单遍扫描：只从上次扫描位置继续找换行
+            for (int i = scanFrom; i < len; i++)
+            {
+                if (buf[i] != (byte)'\n') continue;
+                var line = DecodeLine(buf, lineStart, i);
                 await HandleSseLineAsync(line);
                 lineStart = i + 1;
             }
-            scanFrom = pending.Count; // 已扫到末尾，下轮从新追加的字节继续
-            if (lineStart > 0)
+            scanFrom = len; // 已扫到末尾，下轮从新追加的字节继续
+            // 压实：已处理量超 64KB → 未处理尾部一次性搬到头部、偏移归零（避免长期运行 buf 无限增长）
+            if (lineStart > 65536)
             {
-                pending.RemoveRange(0, lineStart); // 批量移除已处理字节，未完整行保留在头部
+                int remaining = len - lineStart;
+                Array.Copy(buf, lineStart, buf, 0, remaining);
+                len = remaining;
                 lineStart = 0;
-                scanFrom = pending.Count;
+                scanFrom = len;
             }
         }
-        if (pending.Count > 0)
-            await HandleSseLineAsync(DecodeLine(pending, 0, pending.Count));
+        if (len > lineStart)
+            await HandleSseLineAsync(DecodeLine(buf, lineStart, len));
 
         /// <summary>写一行到客户端；有门控时先取锁（与并发 keep-alive 互斥，防 SSE 行交错）。</summary>
         async Task ForwardAsync(string line)
@@ -471,12 +484,10 @@ public static class OutputContinuer
         catch { return null; }
     }
 
-    /// <summary>从字节列表取 [start, end) 区间解码为一行（去 \r）。</summary>
-    private static string DecodeLine(List<byte> pending, int start, int end)
+    /// <summary>从字节缓冲取 [start, end) 区间解码为一行（去 \r）。E-8：直接区间解码，不再逐行 new byte[]。</summary>
+    private static string DecodeLine(byte[] buf, int start, int end)
     {
-        var bytes = new byte[end - start];
-        for (int j = 0; j < bytes.Length; j++) bytes[j] = pending[start + j];
-        var s = Encoding.UTF8.GetString(bytes);
+        var s = Encoding.UTF8.GetString(buf, start, end - start);
         if (s.EndsWith("\r")) s = s.Substring(0, s.Length - 1);
         return s;
     }
