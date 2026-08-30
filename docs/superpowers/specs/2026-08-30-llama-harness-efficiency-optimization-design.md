@@ -87,7 +87,7 @@ LogFile.cs 三个日志文件（harness/slot/warn_error）各持一个常驻 `St
 | 项 | 改动 |
 |---|---|
 | E-7 | `_hc` 去掉 `Connection: close` 默认头，改用 `HttpClientHandler { PooledConnectionLifetime = 30s, PooledConnectionIdleTimeout = 60s }`；保留现有 500ms 重试兜底死连接 |
-| E-8 | OutputContinuer.cs L170~202 SSE 缓冲：`List<byte>` + RemoveRange → `byte[]` + 已处理偏移指针；已处理量超阈值（64KB）时一次性 `Array.Copy` 压实，消除 O(n) 逐批搬移 |
+| E-8 | OutputContinuer.cs L170~202 SSE 缓冲：`List<byte>` + RemoveRange → `byte[]` + 已处理偏移指针（只读游标前移，不搬移字节）；当已处理量超阈值（64KB）时执行一次 `Array.Copy` 把未处理尾部压实到数组头部、偏移归零，消除 O(n) 逐批搬移 |
 | E-9 | MainForm.cs L2163~2166 `OnLogFlush`：batch 先 `string.Concat` 一次 AppendText，再单次遍历着色（替代 N 次 AppendText + N 次 Selection） |
 | E-10 | stats 表加 `Dictionary<long, DataGridViewRow>` 索引（对齐 slot mgmt 已有模式）；`UpdateSummary` 改增量计数器（OnRoundUpdated 时累加），不再每次全量 Sum |
 
