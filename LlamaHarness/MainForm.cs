@@ -2178,6 +2178,7 @@ public class MainForm : Form
         {
             SmartScheduler.Phase.Running => "运行",
             SmartScheduler.Phase.Waking => "唤醒中",
+            SmartScheduler.Phase.Warming => "预热中",
             SmartScheduler.Phase.Sleeping => "休眠",
             _ => "空闲",
         };
@@ -2185,6 +2186,7 @@ public class MainForm : Form
         {
             SmartScheduler.Phase.Running => Color.Green,
             SmartScheduler.Phase.Waking => Color.DarkOrange,
+            SmartScheduler.Phase.Warming => Color.DarkOrange,
             SmartScheduler.Phase.Sleeping => Color.DarkOrange,
             _ => Color.Gray, // Standby 待机
         };

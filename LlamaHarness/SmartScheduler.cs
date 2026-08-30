@@ -16,8 +16,8 @@ namespace LlamaHarness;
 /// </summary>
 public sealed class SmartScheduler : IDisposable
 {
-    /// <summary>调度器状态机</summary>
-    public enum Phase { Standby, Waking, Running, Sleeping }
+    /// <summary>调度器状态机（Warming：就绪后、Running 前的预热子状态——eager restore + dummy 预热，期间请求排队等待唤醒完成）</summary>
+    public enum Phase { Standby, Waking, Warming, Running, Sleeping }
 
     private readonly AppConfig _cfg;
     private readonly LlamaServerProcess _server = new();
@@ -519,6 +519,24 @@ public sealed class SmartScheduler : IDisposable
 
             await WaitReadyAsync(srvPort);
 
+            // 3.2 Warming 子状态：eager restore（autoPre key 有快照者）+ dummy 预热（max_tokens=1 直连后端）。
+            // 期间到达的请求经 EnsureRunningAsync await _wakeTask 天然排队等待（本方法未完成），无需额外机制。
+            // 整体 60s 超时兜底；任何失败不阻塞转 Running（首请求仍有惰性 restore 自愈路径）。
+            SetPhase(Phase.Warming);
+            RaiseStatus("预热中…（restore KV + 捕获 decode graph）");
+            try
+            {
+                using var warmCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+                await RunWarmingAsync(srvPort, warmCts.Token);
+            }
+            catch (Exception ex)
+            {
+                Log?.Invoke($"警告：Warming 阶段异常（{ex.Message}），跳过并进入 Running。");
+            }
+            // 预热期间进程死亡（如 dummy 请求触发 OOM 崩溃）：中止唤醒走失败清理，不带死进程进 Running
+            if (!_server.IsRunning)
+                throw new InvalidOperationException("llama-server 在预热期间退出（疑似崩溃）。");
+
             Touch();
             SetPhase(Phase.Running);
             // C-102：唤醒统计埋点（累计次数 + 本次耗时）
@@ -584,6 +602,74 @@ public sealed class SmartScheduler : IDisposable
             await Task.Delay(2000);
         }
         throw new TimeoutException("等待 llama-server 就绪超时（5 分钟）。");
+    }
+
+    /// <summary>3.2 Warming 子状态主体：eager restore（autoPre key 有快照者）+ best-effort dummy 预热（max_tokens=1 直连后端端口，绕过代理管道）。
+    /// 全部失败不抛（调用方另有兜底 catch）：eager restore 失败 → 首请求惰性 restore 自愈；dummy 预热失败 → 仅损失 CUDA graph 捕获收益。</summary>
+    private async Task RunWarmingAsync(int srvPort, CancellationToken ct)
+    {
+        var kv = _kvCache;
+        var aff = _affinity;
+        if (aff == null) return; // 理论不可达（WakeUpAsync 在 Warming 前已赋值），防御性早退
+        // eager restore：已绑定槽位且有磁盘快照的 autoPre key → 立即恢复 KV（成功记入 _servedKeysThisRun 防首请求重复 restore）
+        if (kv != null)
+        {
+            foreach (var b in aff.Snapshot()) // (Key, App, Slot, LastActive, Preemptive, KvCache)
+            {
+                if (ct.IsCancellationRequested) break;
+                if (!b.KvCache || !IsAutoPreKey(b.Key) || !kv.HasCache(b.Key)) continue;
+                try
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    var restoreTask = kv.RestoreAsync(b.Slot, b.Key);
+                    var guard = Task.Delay(30_000, ct); // 单 key restore 30s 超时（RestoreAsync 内部不响应取消，WhenAny 兜底）
+                    if (await Task.WhenAny(restoreTask, guard) != restoreTask)
+                    {
+                        Log?.Invoke($"Warming eager restore 超时：{b.Key} → slot{b.Slot}，首请求自愈。");
+                        continue;
+                    }
+                    bool ok = await restoreTask;
+                    if (ok)
+                    {
+                        lock (_kvStateGate) _servedKeysThisRun.Add(b.Key);
+                        Log?.Invoke($"[KV-RESTORE] Warming eager restore：{b.Key} → slot{b.Slot}（{sw.Elapsed.TotalSeconds:F1}s）");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log?.Invoke($"Warming eager restore 失败：{b.Key} → slot{b.Slot}（{ex.Message}），首请求自愈。");
+                }
+            }
+        }
+
+        // best-effort dummy 预热：选一个未绑定 KV 快照的槽位发 max_tokens=1 请求，捕获 CUDA graph / 预热 decode 路径。
+        // 只碰无快照槽位：避免污染已 eager restore 的槽位 KV（新进程内存 KV 全空，无需 erase）。
+        var kvBoundSlots = aff.Snapshot().Where(x => x.KvCache).Select(x => x.Slot);
+        int warmSlot = PickWarmSlot(_cfg.Parallel, kvBoundSlots);
+        if (warmSlot < 0)
+        {
+            Log?.Invoke("Warming dummy 预热跳过：全部槽位均绑定 KV 快照 key（防污染已恢复 KV）。");
+            return;
+        }
+        try
+        {
+            var body = $"{{\"model\":\"local_model\",\"messages\":[{{\"role\":\"user\",\"content\":\"warm\"}}],\"max_tokens\":1,\"stream\":false,\"n_slots\":[{warmSlot}]}}";
+            using var content = new ByteArrayContent(Encoding.UTF8.GetBytes(body));
+            content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+            using var resp = await _hc.PostAsync(new Uri($"http://localhost:{srvPort}/v1/chat/completions"), content, ct);
+            Log?.Invoke($"Warming dummy 预热：HTTP {(int)resp.StatusCode}（slot{warmSlot}，decode graph 捕获）");
+        }
+        catch (Exception ex)
+        {
+            Log?.Invoke($"警告：Warming dummy 预热失败（{ex.Message}），不影响后续请求。");
+        }
+    }
+
+    /// <summary>3.2：选 dummy 预热的安全槽位——第一个未绑定 KV 快照的槽位；全绑定时返回 -1（跳过预热，防污染已恢复 KV）。public 供测试。</summary>
+    public static int PickWarmSlot(int parallel, IEnumerable<int> kvBoundSlots)
+    {
+        var bound = new HashSet<int>(kvBoundSlots);
+        return Enumerable.Range(0, Math.Max(parallel, 0)).FirstOrDefault(s => !bound.Contains(s), -1);
     }
 
     /// <summary>把请求原样转发到后端；ResponseHeadersRead + CopyToAsync 保证 SSE/流式响应直通。
