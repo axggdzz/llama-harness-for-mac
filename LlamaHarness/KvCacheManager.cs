@@ -21,7 +21,15 @@ public sealed class KvCacheManager
     private readonly Dictionary<string, Task> _inflightSaves = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>缓存索引持久化文件（exe 同目录）。</summary>
-    private static readonly string IndexPath = Path.Combine(AppContext.BaseDirectory, "kv_cache_index.json");
+    /// <summary>KV Cache 索引路径：项目目录下 config/kv_cache_index.json。</summary>
+    private static readonly string IndexPath = Path.Combine(AppContext.BaseDirectory, "config", "kv_cache_index.json");
+
+    /// <summary>确保 config/ 目录存在（幂等）。</summary>
+    private static void EnsureConfigDir()
+    {
+        var dir = Path.Combine(AppContext.BaseDirectory, "config");
+        if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+    }
 
     /// <summary>key → (slot, savedAt, nTokens, sizeBytes)。</summary>
     private readonly Dictionary<string, CacheEntry> _index = new(StringComparer.OrdinalIgnoreCase);
@@ -272,6 +280,7 @@ public sealed class KvCacheManager
                     ["sizeBytes"] = kv.Value.SizeBytes
                 };
             }
+            EnsureConfigDir();
             File.WriteAllText(IndexPath, obj.ToJsonString());
         }
         catch

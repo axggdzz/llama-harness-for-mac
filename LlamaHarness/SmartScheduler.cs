@@ -1334,8 +1334,10 @@ public sealed class SmartScheduler : IDisposable
             var dumpLine = $"[{ts}] POST {path}\n--- Headers ---\n{headers}--- Body ---\n{bodyStr}\n{new string('=', 80)}\n\n";
             lock (_dumpLock)
             {
+                var logDir = System.IO.Path.Combine(AppContext.BaseDirectory, "logs");
+                if (!System.IO.Directory.Exists(logDir)) System.IO.Directory.CreateDirectory(logDir);
                 using var sw = new StreamWriter(new FileStream(
-                    System.IO.Path.Combine(AppContext.BaseDirectory, "request_dump.log"),
+                    System.IO.Path.Combine(logDir, "request_dump.log"),
                     FileMode.Append, FileAccess.Write));
                 sw.Write(dumpLine);
             }

@@ -73,10 +73,28 @@ public class MainForm : Form
         ForeColor = Color.Silver,
     };
 
-    // —— 系统资源统计（2 秒轮询）——
+    // —— 系统资源统计（手动触发，无轮询）——
     private readonly SystemMetrics _metrics = new();
-    private Label _lblResDetail;
-    private readonly System.Windows.Forms.Timer _metricsTimer = new() { Interval = 2000 };
+    private Button _btnRefreshRes;
+    private Label _lblResTimestamp;
+    private Panel _sysCard;         // 系统资源卡片容器
+    private Label _lblSysRes;       // 系统资源卡片内容
+    private Panel _slotsCard;       // /slots 卡片容器
+    private Label _lblSlotsTitle;   // /slots 标题（含状态 ✓/✗）
+    private Label _lblSlotsBody;    // /slots 数据区
+    private Button _btnRawSlots;    // [查看原始报文 ▸]
+    private TextBox _rawSlotsBox;   // Raw 内容（TextBox 支持滚动）
+    private Panel _propsCard;       // /props 卡片容器
+    private Label _lblPropsTitle;   // /props 标题（含状态 ✓/✗）
+    private TableLayoutPanel _tblPropsBody; // /props 数据区（两列表格：左标签+右值）
+    private Button _btnRawProps;    // [查看原始报文 ▸]
+    private TextBox _rawPropsBox;   // Raw 内容（TextBox 支持滚动）
+    private Panel _metricsCard;     // /metrics 卡片容器
+    private Label _lblMetricsTitle; // /metrics 标题（含状态 ✓/✗）
+    private Label _lblMetricsBody;  // /metrics 数据区
+    private Button _btnRawMetrics;  // [查看原始报文 ▸]
+    private TextBox _rawMetricsBox; // Raw 内容（TextBox 支持滚动）
+    private LlamaCppMonitorCollector? _monitorCollector; // llama.cpp 采集器（懒初始化，端口确定后创建）
     private int _metricsBusy;
     private bool _crashAlertShown; // 崩溃熔断红色告警状态（防重复告警；窗口滑出后自动恢复）
 
@@ -137,11 +155,12 @@ public class MainForm : Form
     private DataGridView _gridSlotMgmt;
     // —— 配置管理页（页签6）——
     private Panel _tabConfig;
+    private Panel _docPanel; // 文档展示面板（右侧，点击使用说明/常见问题/更新内容后显示）
 
     // —— 自定义页签区（替代原生 TabControl：扁平按钮页签条 + Panel 显隐切换，对齐参考界面）——
-    private SplitContainer _contentSplit;   // 左 70% 页签区 | 右 30% 状态面板
+    private SplitContainer _contentSplit;   // 左 80% 页签区 | 右 20% 状态面板（SizeChanged 时按 8:2 重算）
     private Button[] _tabButtons = null!;
-    private Panel[] _tabPages = null!;
+    private Control[] _tabPages = null!; // 页签页（_txtLog 是 RichTextBox，其余为 Panel，统一用 Control）
     private int _currentTab = 0;
 
     // —— 右侧状态面板（原底部 SideStatsPanel 移入）——
@@ -191,6 +210,8 @@ public class MainForm : Form
         // 槽位日志（绑定/驱逐/KV Cache）→ 槽位页 RichTextBox + slot.log 持久化
         _scheduler.SlotLog += OnSlotLog;
 
+
+
         // 启动时按当前附加参数显示初始思考模式（唤醒时会按实际启动参数权威重置）
         RefreshThinkingLabel();
         AppendLog($"思考模式初始状态：「{SmartScheduler.LabelOf(SmartScheduler.DetermineInitialThinkingMode(_config.ExtraArgs))}」");
@@ -213,9 +234,7 @@ public class MainForm : Form
     {
         _scheduler.Initialize();
 
-        // 资源轮询：CPU 需两次采样取差值，首次 tick 建立基准
-        _metricsTimer.Tick += OnMetricsTick;
-        _metricsTimer.Start();
+        // 系统资源改为手动触发（无轮询）：点击「手动刷新」按钮才采集一次
 
         // 日志防抖定时器：批量消费队列，减少 RichTextBox 重绘闪烁。
         // 常驻运行（不 Stop/Start）：跨线程操作 WinForms Timer 会导致 SetTimer 绑定错误消息循环而永久停摆
@@ -223,50 +242,245 @@ public class MainForm : Form
         _logFlushTimer.Start();
     }
 
-    /// <summary>每 2 秒刷新系统资源页签 + 轮询崩溃熔断状态（红色告警）。</summary>
-    private void OnMetricsTick(object? sender, EventArgs e)
+    /// <summary>手动刷新：采集系统资源（本地）+ llama.cpp 三接口（HTTP），更新页面。</summary>
+    private async void OnManualRefresh(object? sender, EventArgs e)
     {
         if (Interlocked.Exchange(ref _metricsBusy, 1) == 1) return;
-        Task.Run(async () =>
+        try
         {
-            try
-            {
-                double cpu = _metrics.GetCpuPercent();
-                var (used, total) = _metrics.GetMemory();
-                string? vram = await _metrics.GetVramTextAsync();
-                bool tripped = CrashRecovery.IsTripped;
-                if (IsDisposed) return;
-                BeginInvoke(() =>
-                {
-                    _lblResDetail.Text =
-                        $"CPU:      {cpu:F0}%\n" +
-                        $"内存:     {used:F1} / {total:F1} GB\n" +
-                        $"显存:     {(vram ?? "—（未检测到 nvidia-smi）")}";
-                    // 右侧状态面板：资源单行摘要 + 运行时长（自本次唤醒起）
-                    _lblResSummary.Text = $"CPU {cpu:F0}% | 内存 {used:F1}/{total:F1}GB";
-                    _lblRunTime.Text = _wakeTime is DateTime wt ? (DateTime.Now - wt).ToString(@"hh\:mm\:ss") : "—";
+            // 1. 系统资源（本地采集，同步）
+            double cpu = _metrics.GetCpuPercent();
+            var (used, total) = _metrics.GetMemory();
+            string? vram = await _metrics.GetVramTextAsync();
 
-                    // 崩溃熔断红色告警：状态切换时醒目日志 + 状态栏变红；窗口滑出后恢复
-                    if (tripped && !_crashAlertShown)
-                    {
-                        _crashAlertShown = true;
-                        AppendLog("⚠⚠ 崩溃熔断器已跳闸：10 分钟内 ≥3 次 bad_alloc，自动恢复已停止。请加内存 / 降上下文后手动重试！");
-                        _lblStatus.ForeColor = Color.FromArgb(0xF5, 0x3F, 0x3F);
-                        _lblStatus.Text = "⚠ 崩溃熔断：自动恢复已停止，需人工介入";
-                    }
-                    else if (!tripped && _crashAlertShown)
-                    {
-                        _crashAlertShown = false;
-                        ApplyPhase(_scheduler.CurrentPhase); // 按当前阶段重渲染状态栏颜色
-                    }
-                });
-            }
-            finally
+            // 2. llama.cpp 三接口（HTTP，懒初始化 collector）
+            EnsureMonitorCollector();
+            LlamaCppMonitorSnapshot? snap = null;
+            if (_monitorCollector != null)
             {
-                Interlocked.Exchange(ref _metricsBusy, 0);
+                try
+                {
+                    snap = await _monitorCollector.CaptureSnapshotAsync();
+                }
+                catch
+                {
+                    // 采集失败（llama-server 未启动等），snap 保持 null
+                }
             }
-        });
+
+            if (IsDisposed) return;
+
+            // 3. 更新 UI
+            _lblSysRes.Text =
+                $"CPU:      {cpu:F0}%\n" +
+                $"内存:     {used:F1} / {total:F1} GB\n" +
+                $"显存:     {(vram ?? "—（未检测到 nvidia-smi）")}";
+
+            // llama.cpp 三卡片：分区容错，各自独立显示成功/失败
+            UpdateSlotsCard(snap);
+            UpdatePropsCard(snap);
+            UpdateMetricsCard(snap);
+
+            // 时间戳
+            _lblResTimestamp.Text = $"上次采集: {DateTime.Now:HH:mm:ss}";
+
+            // 右侧状态面板摘要（保持原有行为）
+            _lblResSummary.Text = $"CPU {cpu:F0}% | 内存 {used:F1}/{total:F1}GB";
+            _lblRunTime.Text = _wakeTime is DateTime wt ? (DateTime.Now - wt).ToString(@"hh\:mm\:ss") : "—";
+
+            // 崩溃熔断红色告警（保留原有逻辑）
+            bool tripped = CrashRecovery.IsTripped;
+            if (tripped && !_crashAlertShown)
+            {
+                _crashAlertShown = true;
+                AppendLog("⚠⚠ 崩溃熔断器已跳闸：10 分钟内 ≥3 次 bad_alloc，自动恢复已停止。请加内存 / 降上下文后手动重试！");
+                _lblStatus.ForeColor = Color.FromArgb(0xF5, 0x3F, 0x3F);
+                _lblStatus.Text = "⚠ 崩溃熔断：自动恢复已停止，需人工介入";
+            }
+            else if (!tripped && _crashAlertShown)
+            {
+                _crashAlertShown = false;
+                ApplyPhase(_scheduler.CurrentPhase);
+            }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _metricsBusy, 0);
+        }
     }
+
+    /// <summary>懒初始化 llama.cpp 采集器（端口确定后创建一次）。</summary>
+    private void EnsureMonitorCollector()
+    {
+        if (_monitorCollector != null) return;
+        int port = _config.Port;
+        _monitorCollector = new LlamaCppMonitorCollector($"http://127.0.0.1:{port}");
+    }
+
+    /// <summary>更新 /slots 卡片：槽位表格（ID/状态/cached/推理中）+ Raw 折叠。</summary>
+    private void UpdateSlotsCard(LlamaCppMonitorSnapshot? snap)
+    {
+        if (snap == null || string.IsNullOrEmpty(snap.RawSlotsJson))
+        {
+            _lblSlotsTitle.Text = "  /slots 槽位状态  ✗ 不可用";
+            _lblSlotsBody.Text = "llama-server 未启动或接口不可达";
+            _btnRawSlots.Visible = false;
+            _rawSlotsBox.Visible = false;
+            return;
+        }
+        _lblSlotsTitle.Text = "  /slots 槽位状态  ✓";
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine(string.Format("{0,-4} {1,-18} {2,8} {3,6} {4,8} {5,10}", "ID", "状态", "cached", "推理中", "spec", "n_ctx"));
+        foreach (var s in snap.Slots)
+        {
+            sb.AppendLine(string.Format("{0,-4} {1,-18} {2,8} {3,6} {4,8} {5,10}", s.id, s.state_name, s.tokens_cached, s.is_processing ? "是" : "否", s.speculative ? "是" : "否", s.n_ctx));
+        }
+        if (snap.Slots.Count == 0) sb.AppendLine("（无槽位数据）");
+        _lblSlotsBody.Text = sb.ToString();
+        _btnRawSlots.Visible = true;
+        _rawSlotsBox.Text = snap.RawSlotsJson;
+    }
+
+    /// <summary>更新 /props 卡片：模型全局配置（两列表格：左标签+右值）+ Raw 折叠。</summary>
+    private void UpdatePropsCard(LlamaCppMonitorSnapshot? snap)
+    {
+        if (snap == null || string.IsNullOrEmpty(snap.RawPropsJson))
+        {
+            _lblPropsTitle.Text = "  /props 模型配置  ✗ 不可用";
+            _tblPropsBody.Controls.Clear();
+            var errLbl = new Label
+            {
+                Text = "llama-server 未启动或接口不可达",
+                Dock = DockStyle.Fill,
+                ForeColor = Color.FromArgb(0xFF, 0x66, 0x66),
+                Font = new Font("Microsoft YaHei UI", 9F),
+                Padding = new Padding(8, 4, 8, 4),
+            };
+            _tblPropsBody.Controls.Add(errLbl);
+            _btnRawProps.Visible = false;
+            _rawPropsBox.Visible = false;
+            return;
+        }
+        _lblPropsTitle.Text = "  /props 模型配置  ✓";
+        var p = snap.GlobalProps;
+
+        // 重建表格行（左标签 + 右值，带分隔线）
+        _tblPropsBody.Controls.Clear();
+        int rowIdx = 0;
+        foreach (var kv in p.RawFields)
+        {
+            if (string.IsNullOrEmpty(kv.Value)) continue;
+            if (kv.Key == "chat_template") continue; // 太长，只在 Raw 区显示
+            string fieldName = kv.Key.Contains('.') ? kv.Key.Split('.').Last() : kv.Key;
+            string val = kv.Value.Length > 120 ? kv.Value[..120] + "…" : kv.Value;
+
+            var lblKey = new Label
+            {
+                Text = fieldName,
+                Dock = DockStyle.Fill,
+                ForeColor = C_TextFg,
+                Font = new Font("Microsoft YaHei UI", 9F),
+                Padding = new Padding(8, 6, 4, 6),
+                BorderStyle = BorderStyle.None,
+                TextAlign = ContentAlignment.MiddleLeft,
+            };
+            var lblVal = new Label
+            {
+                Text = val,
+                Dock = DockStyle.Fill,
+                ForeColor = Color.FromArgb(0xCC, 0xCC, 0xCC),
+                Font = new Font("Consolas", 9F),
+                Padding = new Padding(4, 6, 8, 6),
+                BorderStyle = BorderStyle.None,
+                TextAlign = ContentAlignment.MiddleLeft,
+                MaximumSize = new Size(0, 0),
+                AutoSize = true,
+            };
+            _tblPropsBody.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            _tblPropsBody.Controls.Add(lblKey, 0, rowIdx);
+            _tblPropsBody.Controls.Add(lblVal, 1, rowIdx);
+            rowIdx++;
+        }
+        _btnRawProps.Visible = true;
+        _rawPropsBox.Text = snap.RawPropsJson;
+    }
+
+    /// <summary>更新 /metrics 卡片：Prometheus 文本（显存/KV缓存/吞吐）+ Raw 折叠。</summary>
+    private void UpdateMetricsCard(LlamaCppMonitorSnapshot? snap)
+    {
+        if (snap == null || string.IsNullOrEmpty(snap.RawMetricsText))
+        {
+            _lblMetricsTitle.Text = "  /metrics 全局指标  ✗ 不可用";
+            _lblMetricsBody.Text = "llama-server 未启动或未带 --metrics 参数";
+            _btnRawMetrics.Visible = false;
+            _rawMetricsBox.Visible = false;
+            return;
+        }
+        _lblMetricsTitle.Text = "  /metrics 全局指标  ✓";
+        // 提取关键指标行（含 memory/kv/throughput/tokens 的 metrics）
+        var lines = snap.RawMetricsText.Split('\n');
+        var keyLines = lines.Where(l => l.Contains("memory") || l.Contains("kv_") || l.Contains("throughput") || l.Contains("tokens"))
+                             .Take(10);
+        _lblMetricsBody.Text = string.Join("\n", keyLines) + (keyLines.Count() < lines.Length ? "\n…（完整报文见下方折叠区）" : "");
+        _btnRawMetrics.Visible = true;
+        _rawMetricsBox.Text = snap.RawMetricsText;
+    }
+
+    /// <summary>切换 Raw 折叠区（TextBox）显示/隐藏，并强制重算布局。</summary>
+    private void ToggleRaw(Button btn, TextBox box)
+    {
+        bool show = !box.Visible;
+        box.Visible = show;
+        btn.Text = show ? "收起原始报文 ▴" : "查看原始报文 ▸";
+        // 强制父容器重算布局（卡片高度随内容变化）
+        var parent = box.Parent as Panel;
+        if (parent != null)
+        {
+            parent.Invalidate(true);
+            parent.Update();
+        }
+    }
+
+    /// <summary>创建卡片容器 Panel（深色底 + AutoSize，高度随内容自增长）。</summary>
+    private static Panel MakeCardPanel() => new()
+    {
+        Dock = DockStyle.Fill,
+        BackColor = C_Card,
+        Padding = new Padding(8),
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+    };
+
+    /// <summary>创建 [查看原始报文 ▸] 按钮（Dock Bottom，位于数据区下方）。</summary>
+    private static Button MakeRawButton() => new()
+    {
+        Text = "查看原始报文 ▸",
+        Dock = DockStyle.Bottom,
+        Height = 22,
+        FlatStyle = FlatStyle.Flat,
+        BackColor = Color.FromArgb(0x3D, 0x3D, 0x3D),
+        ForeColor = Color.FromArgb(0xAA, 0xAA, 0xAA),
+        Font = new Font("Microsoft YaHei UI", 8F),
+        TextAlign = ContentAlignment.MiddleLeft,
+        Cursor = Cursors.Hand,
+        Visible = false,
+    };
+
+    /// <summary>创建 Raw 内容 TextBox（Dock Bottom，等宽字体 + 只读 + 可滚动，高度 200px）。</summary>
+    private static TextBox MakeRawTextBox() => new()
+    {
+        Dock = DockStyle.Bottom,
+        Height = 200,
+        Multiline = true,
+        ReadOnly = true,
+        ScrollBars = ScrollBars.Vertical,
+        WordWrap = false,
+        BackColor = C_TextBg,
+        ForeColor = Color.FromArgb(0x99, 0xCC, 0x99),
+        Font = new Font("Consolas", 8F),
+        BorderStyle = BorderStyle.FixedSingle,
+        Visible = false,
+    };
 
     // ==================== UI 构建 ====================
 
@@ -274,7 +488,9 @@ public class MainForm : Form
     {
         Text = "Llama Harness";
         ClientSize = new Size(1280, 800);
-        MinimumSize = new Size(1000, 600);
+        // 最小高度 720：侧边栏 17 行共需 668px 客户区（按键合计 536px + 17×8px 行间距 + 4px 顶部留白），
+        // 客户区 = 窗体高 − 约 39px 标题栏/边框 → 720 留 13px 余量，避免「常见问题/更新内容」在最小窗口被裁切。
+        MinimumSize = new Size(1000, 720);
         StartPosition = FormStartPosition.CenterScreen;
 
         BackColor = C_Bg;
@@ -327,9 +543,27 @@ public class MainForm : Form
         Shown += (_, _) =>
         {
             mainSplit.SplitterDistance = 240; // 侧边栏 240px（容纳按钮文字，避免滚动条）
-            _contentSplit.SplitterDistance = Math.Max(500, (int)(_contentSplit.Width * 0.7)); // 7:3 分栏
+            ApplyContentSplitRatio(); // 初始按 8:2 分栏
+        };
+
+        // 窗口缩放/最大化时：侧边栏固定 240px + 内容区按 8:2 重算，保证任何尺寸下布局稳定
+        mainSplit.SizeChanged += (_, _) =>
+        {
+            if (mainSplit.Width > 0)
+                mainSplit.SplitterDistance = 240; // 侧边栏始终 240px（根因：最大化后 SplitContainer 不自动保持分割位置）
+            ApplyContentSplitRatio();
         };
     }
+
+    /// <summary>按 8:2 比例设置内容分栏：左页签区 80%、右状态面板 20%。</summary>
+    private void ApplyContentSplitRatio()
+    {
+        if (_contentSplit == null || _contentSplit.Width <= 0) return;
+        int avail = _contentSplit.Width - _contentSplit.SplitterWidth;
+        _contentSplit.SplitterDistance = Math.Max(300, (int)(avail * 0.8));
+    }
+
+
 
     /// <summary>左侧边栏 (200px)：应用名 + Control Panel + Configuration + User Manual。
     /// 按钮带参考界面 PNG 图标（static/icon），悬停变亮，对齐 Auto_Pilot 侧边栏样式。</summary>
@@ -390,9 +624,9 @@ public class MainForm : Form
         var btnHelp = MakeBtn("使用说明", "使用说明.png", h: 30);
         var btnFaq = MakeBtn("常见问题", "常见问题.png", h: 30);
         var btnChangelog = MakeBtn("更新内容", "更新内容.png", h: 30);
-        btnHelp.Click += (_, _) => ShowDocForm("使用说明", "static/doc/readme.md");
-        btnFaq.Click += (_, _) => ShowDocForm("常见问题", "static/doc/FAQs.md");
-        btnChangelog.Click += (_, _) => ShowDocForm("更新内容", "static/doc/update.md");
+        btnHelp.Click += (_, _) => { SelectTab(6); ShowDocInPanel(_docPanel, "使用说明", "static/doc/readme.md"); };
+        btnFaq.Click += (_, _) => { SelectTab(6); ShowDocInPanel(_docPanel, "常见问题", "static/doc/FAQs.md"); };
+        btnChangelog.Click += (_, _) => { SelectTab(6); ShowDocInPanel(_docPanel, "更新内容", "static/doc/update.md"); };
 
         // ── 布局网格：[12.5% | 75% | 12.5%] 三列——所有按键/容器放中列，
         // 等宽（含应用名）+ 居中 + 左右间隔等宽；Percent 列保证侧边栏放大时边距等比缩放 ──
@@ -408,11 +642,13 @@ public class MainForm : Form
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 75f));   // 内容列（所有按键等宽）
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 12.5f)); // 右边距（等比）
 
+        // 行高 = 按钮高度 + 上下留白（各 4px），按钮 Dock=Top + Margin 垂直居中，不顶满
         void AddRow(Control c, int h)
         {
             int row = grid.RowStyles.Count;
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, h)); // 固定行高（px），不随内容拉伸
-            c.Dock = DockStyle.Fill; // 撑满中列 → 宽度统一
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, h + 8)); // 行高 = 内容高 + 8px 留白
+            c.Dock = DockStyle.Top; // 宽度撑满中列，高度固定为控件自身 Height
+            c.Margin = new Padding(0, 4, 0, 4); // 上下各 4px → 垂直居中
             grid.Controls.Add(c, 1, row);
         }
 
@@ -489,40 +725,153 @@ public class MainForm : Form
     }
 
     /// <summary>帮助文档窗体（只读深色 TextBox 显示 static/doc 下对应 md；文件缺失时提示）。</summary>
-    private void ShowDocForm(string title, string relPath)
+    /// <summary>将 Markdown 文档渲染到 RichTextBox（支持标题/代码块/列表/粗体/行内代码）。</summary>
+    private static void RenderMarkdownToRichTextBox(RichTextBox rtb, string md)
     {
-        var path = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, relPath.Replace('/', Path.DirectorySeparatorChar)));
-        string text;
-        try
+        rtb.Clear();
+        rtb.ReadOnly = true;
+        rtb.BackColor = C_TextBg;
+        rtb.ForeColor = C_TextFg;
+        rtb.Font = new Font("Microsoft YaHei UI", 9F);
+
+        var lines = md.Split('\n');
+        bool inCodeBlock = false;
+
+        foreach (var line in lines)
         {
-            text = File.Exists(path) ? File.ReadAllText(path) : "（文档文件缺失：" + relPath + "）";
+            // 代码块开关
+            if (line.StartsWith("```"))
+            {
+                inCodeBlock = !inCodeBlock;
+                continue;
+            }
+
+            if (inCodeBlock)
+            {
+                rtb.SelectionStart = rtb.TextLength;
+                rtb.SelectionFont = new Font("Consolas", 9F);
+                rtb.SelectionColor = Color.FromArgb(0x99, 0xCC, 0x99);
+                rtb.AppendText(line + "\n");
+                continue;
+            }
+
+            // 标题
+            if (line.StartsWith("#### "))
+            {
+                rtb.SelectionStart = rtb.TextLength;
+                rtb.SelectionFont = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold);
+                rtb.SelectionColor = Color.FromArgb(0xFF, 0xA5, 0x00);
+                rtb.AppendText(line.Substring(5) + "\n\n");
+                continue;
+            }
+            if (line.StartsWith("### "))
+            {
+                rtb.SelectionStart = rtb.TextLength;
+                rtb.SelectionFont = new Font("Microsoft YaHei UI", 11F, FontStyle.Bold);
+                rtb.SelectionColor = Color.FromArgb(0xFF, 0xA5, 0x00);
+                rtb.AppendText(line.Substring(4) + "\n\n");
+                continue;
+            }
+            if (line.StartsWith("## "))
+            {
+                rtb.SelectionStart = rtb.TextLength;
+                rtb.SelectionFont = new Font("Microsoft YaHei UI", 12F, FontStyle.Bold);
+                rtb.SelectionColor = Color.FromArgb(0xFF, 0xA5, 0x00);
+                rtb.AppendText(line.Substring(3) + "\n\n");
+                continue;
+            }
+            if (line.StartsWith("# "))
+            {
+                rtb.SelectionStart = rtb.TextLength;
+                rtb.SelectionFont = new Font("Microsoft YaHei UI", 14F, FontStyle.Bold);
+                rtb.SelectionColor = Color.FromArgb(0xFF, 0xA5, 0x00);
+                rtb.AppendText(line.Substring(2) + "\n\n");
+                continue;
+            }
+
+            // 列表项
+            if (line.StartsWith("- ") || line.StartsWith("* "))
+            {
+                rtb.SelectionStart = rtb.TextLength;
+                rtb.SelectionFont = new Font("Microsoft YaHei UI", 9F);
+                rtb.SelectionColor = C_TextFg;
+                rtb.AppendText("  • " + StripMdInline(line.Substring(2)) + "\n");
+                continue;
+            }
+
+            // 引用块
+            if (line.StartsWith("> "))
+            {
+                rtb.SelectionStart = rtb.TextLength;
+                rtb.SelectionFont = new Font("Microsoft YaHei UI", 9F, FontStyle.Italic);
+                rtb.SelectionColor = Color.FromArgb(0x88, 0x88, 0x88);
+                rtb.AppendText("  │ " + StripMdInline(line.Substring(2)) + "\n");
+                continue;
+            }
+
+            // 空行
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                rtb.SelectionStart = rtb.TextLength;
+                rtb.SelectionFont = new Font("Microsoft YaHei UI", 9F);
+                rtb.SelectionColor = C_TextFg;
+                rtb.AppendText("\n");
+                continue;
+            }
+
+            // 普通段落
+            rtb.SelectionStart = rtb.TextLength;
+            rtb.SelectionFont = new Font("Microsoft YaHei UI", 9F);
+            rtb.SelectionColor = C_TextFg;
+            rtb.AppendText(StripMdInline(line) + "\n");
         }
-        catch
-        {
-            text = "（文档加载失败）";
-        }
-        var f = new Form
-        {
-            Text = $"Llama Harness - {title}",
-            Size = new Size(780, 580),
-            StartPosition = FormStartPosition.CenterParent,
-            BackColor = C_TextBg,
-            ForeColor = C_TextFg,
-        };
-        var tb = new TextBox
+
+        // 重置默认字体
+        rtb.SelectionStart = 0;
+        rtb.SelectionLength = 0;
+        rtb.SelectionFont = new Font("Microsoft YaHei UI", 9F);
+        rtb.SelectionColor = C_TextFg;
+    }
+
+    /// <summary>去除行内 Markdown 标记（**粗体** / `code` / [text](url)）。</summary>
+    private static string StripMdInline(string text)
+    {
+        var s = System.Text.RegularExpressions.Regex.Replace(text, @"\*\*(.+?)\*\*", "$1");
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"`(.+?)`", "$1");
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"\[(.+?)\]\(.*?\)", "$1");
+        return s;
+    }
+
+    /// <summary>在指定 Panel 中渲染 Markdown 文档（内嵌显示，不新开窗口）。</summary>
+    private void ShowDocInPanel(Panel container, string title, string relPath)
+    {
+        // 清除容器现有内容
+        container.Controls.Clear();
+        container.Visible = true;
+
+        var rtb = new RichTextBox
         {
             Dock = DockStyle.Fill,
             ReadOnly = true,
-            Multiline = true,
-            ScrollBars = ScrollBars.Both,
-            WordWrap = false,
             BackColor = C_TextBg,
             ForeColor = C_TextFg,
-            Font = new Font("Microsoft YaHei UI", 10F),
-            Text = text,
+            BorderStyle = BorderStyle.None,
+            Font = new Font("Microsoft YaHei UI", 9F),
         };
-        f.Controls.Add(tb);
-        f.Show(this);
+
+        var path = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, relPath.Replace('/', Path.DirectorySeparatorChar)));
+        string mdText;
+        try
+        {
+            mdText = File.Exists(path) ? File.ReadAllText(path) : "（文档文件缺失：" + relPath + "）";
+        }
+        catch
+        {
+            mdText = "（文档加载失败）";
+        }
+
+        RenderMarkdownToRichTextBox(rtb, mdText);
+        container.Controls.Add(rtb);
     }
 
     /// <summary>顶部橙色大标题块 (~90px，对齐参考界面)：左多行橙黄主标题 + 右操作提示。</summary>
@@ -562,10 +911,9 @@ public class MainForm : Form
     /// 选中 = #FFA500 底黑字；未选 = #3d3d3d 底白字。</summary>
     private Panel BuildTabArea()
     {
+        // 精简嵌套：_txtLog 直接作为页签页（去掉原 pad/tabLog 冗余 Panel 层），
+        // 布局链 = _contentSplit.Panel1 → container → host → _txtLog，无任何 Padding
         var container = new Panel { Dock = DockStyle.Fill, BackColor = C_Bg };
-
-        var tabLog = new Panel { Dock = DockStyle.Fill, BackColor = C_TextBg, Padding = new Padding(4) };
-        tabLog.Controls.Add(_txtLog);
 
         var tabStats = new Panel { Dock = DockStyle.Fill, BackColor = C_Bg, Padding = new Padding(10) };
         tabStats.Controls.Add(BuildStatsPanel());
@@ -586,6 +934,7 @@ public class MainForm : Form
         _gridSlots = MakeGrid();
         _gridSlots.Dock = DockStyle.Top;
         _gridSlots.Height = 260;
+        ApplyStatsGridStyle(_gridSlots);
         _gridSlots.Columns.AddRange(MakeGridCol("亲和 Key"), MakeGridCol("应用"), MakeGridCol("槽位"), MakeGridCol("最后活跃"));
         tabSlots.Controls.Add(_txtSlotLog);
         tabSlots.Controls.Add(_gridSlots);
@@ -594,27 +943,164 @@ public class MainForm : Form
         _tabSlotMgmt = new Panel { Dock = DockStyle.Fill, BackColor = C_Bg, Padding = new Padding(10) };
         _gridSlotMgmt = MakeGrid();
         _gridSlotMgmt.ReadOnly = false;
+        ApplyStatsGridStyle(_gridSlotMgmt);
         _gridSlotMgmt.Columns.AddRange(
             MakeGridCol("亲和 Key"), MakeGridCol("应用"), MakeGridCol("槽位"),
             MakeCheckCol("强占"), MakeCheckCol("KV缓存"), MakeGridCol("最后活跃"));
         _gridSlotMgmt.CellValueChanged += OnSlotMgmtCellChanged;
         _tabSlotMgmt.Controls.Add(_gridSlotMgmt);
 
-        var tabRes = new Panel { Dock = DockStyle.Fill, BackColor = C_Bg, Padding = new Padding(10) };
-        _lblResDetail = new Label
+        // ════════════ 系统资源页：可滚动 Panel + TableLayoutPanel 纵向布局 ════════════
+        var tabRes = new Panel { Dock = DockStyle.Fill, BackColor = C_Bg, Padding = new Padding(10), AutoScroll = true };
+
+        // TableLayoutPanel：9 行（工具栏 + 4×标题/卡片），每行 AutoSize
+        var resLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            BackColor = C_Bg,
+            ColumnCount = 1,
+            RowCount = 9,
+            Padding = new Padding(0),
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        };
+        for (int r = 0; r < 9; r++)
+            resLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        // 行0：顶部工具栏（[手动刷新] 按钮 + 上次采集时间）
+        var toolbarPanel = new Panel { Dock = DockStyle.Fill, Height = 52, BackColor = C_Bg };
+        _btnRefreshRes = new Button
+        {
+            Text = "手动刷新",
+            Dock = DockStyle.Top,
+            Height = 32,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = C_Primary,
+            ForeColor = Color.Black,
+            Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold),
+            Cursor = Cursors.Hand,
+        };
+        _btnRefreshRes.FlatAppearance.BorderSize = 0;
+        _lblResTimestamp = new Label
+        {
+            Text = "尚未采集",
+            Dock = DockStyle.Top,
+            Height = 20,
+            TextAlign = ContentAlignment.MiddleRight,
+            ForeColor = Color.FromArgb(0x88, 0x88, 0x88),
+            Font = new Font("Microsoft YaHei UI", 8F),
+        };
+        toolbarPanel.Controls.Add(_lblResTimestamp);
+        toolbarPanel.Controls.Add(_btnRefreshRes);
+        resLayout.Controls.Add(toolbarPanel, 0, 0);
+
+        // 行1：系统资源标题（独立行，不在卡片内）
+        var sysTitle = MakeCardTitle("系统资源");
+        resLayout.Controls.Add(sysTitle, 0, 1);
+
+        // 行2：系统资源卡片（本地采集：CPU / 内存 / 显存）
+        _sysCard = MakeCardPanel();
+        _lblSysRes = new Label
         {
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
-            Font = new Font("Consolas", 12F),
+            Font = new Font("Consolas", 10F),
             ForeColor = C_TextFg,
+            Padding = new Padding(8, 4, 8, 4),
+            AutoSize = true,
+            MaximumSize = new Size(0, 0),
         };
-        tabRes.Controls.Add(_lblResDetail);
+        _sysCard.Controls.Add(_lblSysRes);
+        resLayout.Controls.Add(_sysCard, 0, 2);
 
+        // 行3：/slots 标题（独立行）
+        _lblSlotsTitle = MakeCardTitle("/slots 槽位状态");
+        resLayout.Controls.Add(_lblSlotsTitle, 0, 3);
+
+        // 行4：/slots 卡片（数据区 + Raw 按钮/TextBox）
+        _slotsCard = MakeCardPanel();
+        _lblSlotsBody = new Label
+        {
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.TopLeft,
+            Font = new Font("Consolas", 9F),
+            ForeColor = C_TextFg,
+            Padding = new Padding(8, 4, 8, 4),
+            AutoSize = true,
+            MaximumSize = new Size(0, 0),
+        };
+        _btnRawSlots = MakeRawButton();
+        _rawSlotsBox = MakeRawTextBox();
+        _slotsCard.Controls.Add(_lblSlotsBody);
+        _slotsCard.Controls.Add(_btnRawSlots);
+        _slotsCard.Controls.Add(_rawSlotsBox);
+        resLayout.Controls.Add(_slotsCard, 0, 4);
+
+        // 行5：/props 标题（独立行）
+        _lblPropsTitle = MakeCardTitle("/props 模型配置");
+        resLayout.Controls.Add(_lblPropsTitle, 0, 5);
+
+        // 行6：/props 卡片（两列表格数据区 + Raw 按钮/TextBox）
+        _propsCard = MakeCardPanel();
+        _tblPropsBody = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = C_Card,
+            ColumnCount = 2,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Padding = new Padding(4),
+        };
+        _tblPropsBody.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30f)); // 左列：标签
+        _tblPropsBody.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 70f)); // 右列：值
+        _btnRawProps = MakeRawButton();
+        _rawPropsBox = MakeRawTextBox();
+        _propsCard.Controls.Add(_tblPropsBody);
+        _propsCard.Controls.Add(_btnRawProps);
+        _propsCard.Controls.Add(_rawPropsBox);
+        resLayout.Controls.Add(_propsCard, 0, 6);
+
+        // 行7：/metrics 标题（独立行）
+        _lblMetricsTitle = MakeCardTitle("/metrics 全局指标");
+        resLayout.Controls.Add(_lblMetricsTitle, 0, 7);
+
+        // 行8：/metrics 卡片（数据区 + Raw 按钮/TextBox）
+        _metricsCard = MakeCardPanel();
+        _lblMetricsBody = new Label
+        {
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.TopLeft,
+            Font = new Font("Consolas", 9F),
+            ForeColor = C_TextFg,
+            Padding = new Padding(8, 4, 8, 4),
+            AutoSize = true,
+            MaximumSize = new Size(0, 0),
+        };
+        _btnRawMetrics = MakeRawButton();
+        _rawMetricsBox = MakeRawTextBox();
+        _metricsCard.Controls.Add(_lblMetricsBody);
+        _metricsCard.Controls.Add(_btnRawMetrics);
+        _metricsCard.Controls.Add(_rawMetricsBox);
+        resLayout.Controls.Add(_metricsCard, 0, 8);
+
+        tabRes.Controls.Add(resLayout);
+
+        // 手动刷新按钮事件
+        _btnRefreshRes.Click += OnManualRefresh;
+        // Raw 折叠按钮事件
+        _btnRawSlots.Click += (s, e) => ToggleRaw(_btnRawSlots, _rawSlotsBox);
+        _btnRawProps.Click += (s, e) => ToggleRaw(_btnRawProps, _rawPropsBox);
+        _btnRawMetrics.Click += (s, e) => ToggleRaw(_btnRawMetrics, _rawMetricsBox);
+
+        // 配置管理页（纯配置面板）
         _tabConfig = new Panel { Dock = DockStyle.Fill, BackColor = C_Bg, Padding = new Padding(10), AutoScroll = true };
         _tabConfig.Controls.Add(BuildConfigPanel());
 
-        // 页签条：6 个扁平按钮（选中橙底黑字 / 未选 #3d3d3d 白字，悬停变亮）
-        string[] names = { "日志", "统计", "槽位绑定", "槽位管理", "系统资源", "配置管理" };
+        // 信息展示页（独立页签，与配置管理平级；点击使用说明/常见问题/更新内容后显示 MD）
+        _docPanel = new Panel { Dock = DockStyle.Fill, BackColor = C_TextBg, Padding = new Padding(8) };
+
+        // 页签条：7 个扁平按钮（选中橙底黑字 / 未选 #3d3d3d 白字，悬停变亮）
+        string[] names = { "日志", "统计", "槽位绑定", "槽位管理", "系统资源", "配置管理", "信息展示" };
         _tabButtons = new Button[names.Length];
         for (int i = 0; i < names.Length; i++)
         {
@@ -636,33 +1122,29 @@ public class MainForm : Form
         };
         foreach (var b in _tabButtons) tabStrip.Controls.Add(b);
 
-        // 内容宿主：6 页叠放 + Visible 切换
+        // 内容宿主：6 页叠放 + Visible 切换（_txtLog 直接作为一页，无中间包装 Panel）
         var host = new Panel { Dock = DockStyle.Fill, BackColor = C_Bg };
-        _tabPages = new[] { tabLog, tabStats, tabSlots, _tabSlotMgmt, tabRes, _tabConfig };
+        _tabPages = new Control[] { _txtLog, tabStats, tabSlots, _tabSlotMgmt, tabRes, _tabConfig, _docPanel };
         foreach (var p in _tabPages) host.Controls.Add(p);
 
         container.Controls.Add(host);
         container.Controls.Add(tabStrip); // Dock Top，后添加 → 位于最上
         SelectTab(0);
-
-        // 四周等宽边距（固定 px：左右/上下各 16px，绝对值不随窗口缩放变化，始终等宽）
-        var pad = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 3,
-            BackColor = C_Bg,
-            Margin = new Padding(0),
-            Padding = new Padding(0),
-        };
-        pad.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 16));  // 左边距（固定 16px）
-        pad.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));  // 内容（剩余全部）
-        pad.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 16));  // 右边距（固定 16px）
-        pad.RowStyles.Add(new RowStyle(SizeType.Absolute, 16));    // 上边距（固定 16px）
-        pad.RowStyles.Add(new RowStyle(SizeType.Percent, 100));    // 内容（剩余全部）
-        pad.RowStyles.Add(new RowStyle(SizeType.Absolute, 16));    // 下边距（固定 16px）
-        pad.Controls.Add(container, 1, 1);
-        return pad;
+        return container;
     }
+
+    /// <summary>卡片标题行（加粗 + 固定高度，用于系统资源页各区块标题）。</summary>
+    private static Label MakeCardTitle(string text) => new()
+    {
+        Text = $"  {text}",
+        Dock = DockStyle.Top,
+        AutoSize = true,
+        ForeColor = C_Title,
+        BackColor = Color.Black,
+        Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold),
+        TextAlign = ContentAlignment.MiddleLeft,
+        Padding = new Padding(0, 4, 0, 4),
+    };
 
     /// <summary>扁平页签按钮（#3d3d3d 底白字，尺寸自适应文字，无边框）。</summary>
     private static Button MakeTabBtn(string text)
@@ -844,6 +1326,17 @@ public class MainForm : Form
         AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
     };
 
+    /// <summary>应用统计页表格样式（行高/交替行色/列头样式），保持各页面表格统一。</summary>
+    private static void ApplyStatsGridStyle(DataGridView grid)
+    {
+        grid.DefaultCellStyle.BackColor = C_TextBg;
+        grid.DefaultCellStyle.ForeColor = C_TextFg;
+        grid.AlternatingRowsDefaultCellStyle.BackColor = C_Frame;
+        grid.ColumnHeadersDefaultCellStyle.BackColor = C_Card;
+        grid.ColumnHeadersDefaultCellStyle.ForeColor = C_Aux;
+        grid.RowTemplate.Height = 22;
+    }
+
     private static DataGridViewTextBoxColumn MakeGridCol(string header) => new()
     {
         HeaderText = header,
@@ -862,7 +1355,8 @@ public class MainForm : Form
     private static Label MakeSectionTitle(string text) => new()
     {
         Text = $"  {text}",
-        Dock = DockStyle.Fill,
+        Height = 30, // 固定高度（Dock=Top 时由 AddRow 统一设置 Dock）
+        AutoSize = false,
         ForeColor = C_Title,
         BackColor = Color.Black, // 黑底容器（层次感）
         Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold),
@@ -1003,11 +1497,7 @@ public class MainForm : Form
         panel.Controls.Add(_gridStats, 0, 1);
         panel.SetColumnSpan(_gridStats, 2);
 
-        _gridStats.DefaultCellStyle.BackColor = C_TextBg;
-        _gridStats.DefaultCellStyle.ForeColor = C_TextFg;
-        _gridStats.AlternatingRowsDefaultCellStyle.BackColor = C_Frame;
-        _gridStats.ColumnHeadersDefaultCellStyle.BackColor = C_Card;
-        _gridStats.ColumnHeadersDefaultCellStyle.ForeColor = C_Aux;
+        ApplyStatsGridStyle(_gridStats);
         _gridStats.Columns.AddRange(
             MakeGridCol("时间"),
             MakeGridCol("输入tokens"),
@@ -1356,7 +1846,7 @@ public class MainForm : Form
         if (bindings == null || bindings.Count == 0)
         {
             _gridSlots.Rows.Clear();
-            _lblSlotSummary.Text = "槽位: —（未启用多槽）";
+            _lblSlotSummary.Text = "槽位: 0 绑定";
             return;
         }
         _gridSlots.Rows.Clear();
@@ -1459,7 +1949,14 @@ public class MainForm : Form
         if (phase == SmartScheduler.Phase.Waking)
             _statsParser.Reset();
         if (!IsHandleCreated) return;
-        BeginInvoke(() => ApplyPhase(phase));
+        BeginInvoke(() =>
+        {
+            ApplyPhase(phase);
+            // 唤醒后刷新槽位绑定/管理页面：SlotAffinity 在唤醒时创建并从 slot_bindings.json 恢复历史绑定，
+            // 但 SlotBindingChanged 仅在新绑定创建时触发，已恢复的绑定不会触发 → 此处主动刷新
+            if (phase == SmartScheduler.Phase.Running)
+                RefreshSlotBindings();
+        });
     }
 
     // ==================== 统计 ====================
@@ -1612,7 +2109,6 @@ public class MainForm : Form
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
-        _metricsTimer.Stop();
         _logFlushTimer.Stop();
         // 刷出队列中剩余日志（避免最后几条丢失）
         bool hasPending;

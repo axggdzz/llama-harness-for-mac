@@ -1,0 +1,210 @@
+using System.Text.Json;
+
+namespace LlamaHarness;
+
+/// <summary>
+/// llama.cpp 手动采集的完整监控快照，一次触发生成一份。
+/// 保留 Raw 原始报文，方便后续调试、排查。
+/// </summary>
+public class LlamaCppMonitorSnapshot
+{
+    /// <summary>快照采集时间</summary>
+    public DateTime CaptureAt { get; set; }
+
+    /// <summary>/props 原始 json 字符串</summary>
+    public string RawPropsJson { get; set; } = "";
+    /// <summary>/slots 原始 json 字符串</summary>
+    public string RawSlotsJson { get; set; } = "";
+    /// <summary>/metrics 原始文本</summary>
+    public string RawMetricsText { get; set; } = "";
+
+    /// <summary>解析之后的槽位信息</summary>
+    public List<LlamaSlotInfo> Slots { get; set; } = new();
+    /// <summary>全局属性</summary>
+    public LlamaGlobalProps GlobalProps { get; set; } = new();
+}
+
+/// <summary>单个槽位信息，映射 /slots 接口返回。</summary>
+public class LlamaSlotInfo
+{
+    public int id { get; set; }
+    public long id_task { get; set; }
+    public string state_name { get; set; } = "";
+    public int n_ctx { get; set; }
+    public int tokens_cached { get; set; }
+    public bool is_processing { get; set; }
+    public bool speculative { get; set; }
+    public double pp_tps { get; set; }
+    public double tg_tps { get; set; }
+}
+
+/// <summary>/props 全局配置（llama-server 返回的全部字段）。</summary>
+public class LlamaGlobalProps
+{
+    public int total_slots { get; set; }
+    public int ctx_size { get; set; }
+    public string model_path { get; set; } = "";
+    public string model { get; set; } = "";
+    public string model_string { get; set; } = "";
+    public string seed { get; set; } = "";
+    public string generation_seed { get; set; } = "";
+    public int image_model_size { get; set; }
+    public int n_gpu_layers { get; set; }
+    public int main_gpu { get; set; }
+    public int flash_attn { get; set; }
+    public int rope_freq_base { get; set; }
+    public int rope_freq_sliding { get; set; }
+    public int n_ctx { get; set; }
+    public int n_batch { get; set; }
+    public int n_ubatch { get; set; }
+    public int n_threads { get; set; }
+    public int n_threads_batch { get; set; }
+    public int n_regex { get; set; }
+    public int max_batch_size { get; set; }
+    public int cache_k_size { get; set; }
+    public int no_perf_time_report { get; set; }
+    public string name { get; set; } = "";
+    public string description { get; set; } = "";
+    public string author { get; set; } = "";
+    public string license { get; set; } = "";
+    public string architecture { get; set; } = "";
+    public string parameters { get; set; } = "";
+    public string embedding_size { get; set; } = "";
+    public string vocabulary_size { get; set; } = "";
+    public string modality { get; set; } = "";
+    public string build_info { get; set; } = "";
+    public string chat_template { get; set; } = "";
+    /// <summary>原始 JSON 全部字段（key→value），用于展示未映射到强类型字段的属性。</summary>
+    public Dictionary<string, string> RawFields { get; set; } = new();
+}
+
+/// <summary>
+/// llama.cpp 手动采集服务：点击/调用才拉取一次 /slots、/props、/metrics，无后台轮询。
+/// 三个接口独立容错——任一失败不影响其他接口的数据。
+/// </summary>
+public class LlamaCppMonitorCollector
+{
+    private readonly HttpClient _httpClient;
+
+    public LlamaCppMonitorCollector(string baseAddress)
+    {
+        var uri = baseAddress.TrimEnd('/');
+        _httpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(8),
+            BaseAddress = new Uri(uri),
+        };
+    }
+
+    /// <summary>
+    /// 【手动触发】采集一次完整快照。三个接口并行请求，各自独立容错：
+    /// - 某接口失败时，对应 Raw 字段为空、解析结果为空/默认值，不抛异常；
+    /// - 调用方可通过 <see cref="LlamaCppMonitorSnapshot"/> 的 Raw 字段是否为空判断各接口成功与否。
+    /// </summary>
+    public async Task<LlamaCppMonitorSnapshot> CaptureSnapshotAsync(CancellationToken ct = default)
+    {
+        var snapshot = new LlamaCppMonitorSnapshot { CaptureAt = DateTime.Now };
+
+        // 三个接口并行请求（各自独立容错）
+        var slotsTask = FetchAsync("/slots", ct);
+        var propsTask = FetchAsync("/props", ct);
+        var metricsTask = FetchAsync("/metrics", ct);
+
+        await Task.WhenAll(slotsTask, propsTask, metricsTask);
+
+        // /slots：解析为槽位列表
+        if (!string.IsNullOrEmpty(slotsTask.Result))
+        {
+            snapshot.RawSlotsJson = slotsTask.Result;
+            try
+            {
+                snapshot.Slots = JsonSerializer.Deserialize<List<LlamaSlotInfo>>(snapshot.RawSlotsJson) ?? new List<LlamaSlotInfo>();
+            }
+            catch
+            {
+                // 解析失败保留 Raw，Slots 保持空列表
+            }
+        }
+
+        // /props：解析为全局配置 + 遍历全部字段
+        if (!string.IsNullOrEmpty(propsTask.Result))
+        {
+            snapshot.RawPropsJson = propsTask.Result;
+            try
+            {
+                snapshot.GlobalProps = JsonSerializer.Deserialize<LlamaGlobalProps>(snapshot.RawPropsJson) ?? new LlamaGlobalProps();
+                // 递归展开原始 JSON 所有字段（含嵌套），存入 RawFields（key.path → value）
+                using var doc = JsonDocument.Parse(snapshot.RawPropsJson);
+                FlattenJson(doc.RootElement, "", snapshot.GlobalProps.RawFields);
+            }
+            catch
+            {
+                // 解析失败保留 Raw，GlobalProps 保持默认值
+            }
+        }
+
+        // /metrics：Prometheus 文本格式，直接保留原文
+        if (!string.IsNullOrEmpty(metricsTask.Result))
+        {
+            snapshot.RawMetricsText = metricsTask.Result;
+        }
+
+        return snapshot;
+    }
+
+    /// <summary>请求单个接口；失败（超时/404/连接拒绝）返回 null，不抛异常。</summary>
+    private async Task<string?> FetchAsync(string path, CancellationToken ct)
+    {
+        try
+        {
+            var resp = await _httpClient.GetAsync(path, ct);
+            if (!resp.IsSuccessStatusCode) return null;
+            return await resp.Content.ReadAsStringAsync(ct);
+        }
+        catch
+        {
+            // 连接失败/超时/取消——返回 null，调用方按"该接口不可用"处理
+            return null;
+        }
+    }
+
+    /// <summary>递归展开 JSON 对象为扁平 key.path → value 字典（嵌套对象/数组用 . 连接）。</summary>
+    private static void FlattenJson(JsonElement element, string prefix, Dictionary<string, string> result)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in element.EnumerateObject())
+            {
+                var key = string.IsNullOrEmpty(prefix) ? prop.Name : $"{prefix}.{prop.Name}";
+                if (prop.Value.ValueKind == JsonValueKind.Object || prop.Value.ValueKind == JsonValueKind.Array)
+                {
+                    // 嵌套对象/数组：递归展开
+                    FlattenJson(prop.Value, key, result);
+                }
+                else
+                {
+                    // 叶子节点：直接存入
+                    result[key] = prop.Value.ToString();
+                }
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            for (int i = 0; i < element.GetArrayLength(); i++)
+            {
+                var key = $"{prefix}[{i}]";
+                if (element[i].ValueKind == JsonValueKind.Object || element[i].ValueKind == JsonValueKind.Array)
+                {
+                    FlattenJson(element[i], key, result);
+                }
+                else
+                {
+                    result[key] = element[i].ToString();
+                }
+            }
+        }
+    }
+
+    /// <summary>释放 HttpClient 资源。</summary>
+    public void Dispose() => _httpClient.Dispose();
+}

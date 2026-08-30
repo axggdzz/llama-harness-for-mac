@@ -37,16 +37,18 @@ internal static class Program
         }
     }
 
-    /// <summary>后台线程未处理异常处理器：崩溃信息写入 unhandled.log。</summary>
+    /// <summary>后台线程未处理异常处理器：崩溃信息写入 logs/unhandled.log。</summary>
     private static void OnBackgroundUnhandledException(object sender, System.UnhandledExceptionEventArgs e)
         => LogCrash(e.ExceptionObject as Exception ?? new Exception("未知异常类型")); // .NET Core 中属性名为 ExceptionObject 且类型为 object
 
-    /// <summary>尽力把崩溃信息追加到 exe 旁 unhandled.log。</summary>
+    /// <summary>尽力把崩溃信息追加到项目目录下 logs/unhandled.log。</summary>
     private static void LogCrash(Exception ex)
     {
         try
         {
-            File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "unhandled.log"),
+            var logDir = Path.Combine(AppContext.BaseDirectory, "logs");
+            if (!Directory.Exists(logDir)) Directory.CreateDirectory(logDir);
+            File.AppendAllText(Path.Combine(logDir, "unhandled.log"),
                 $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {ex}\n\n");
         }
         catch

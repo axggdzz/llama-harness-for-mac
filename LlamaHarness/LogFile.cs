@@ -10,6 +10,16 @@ public static class LogFile
 {
     private static readonly object _gate = new();
 
+    /// <summary>日志目录：项目目录下 logs/（首次写入时自动创建）。</summary>
+    internal static string LogDir => Path.Combine(AppContext.BaseDirectory, "logs");
+
+    /// <summary>确保日志目录存在（幂等）。</summary>
+    private static void EnsureLogDir()
+    {
+        var dir = LogDir;
+        if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+    }
+
     /// <summary>主日志大小上限（字节）。</summary>
     private const long MaxLogBytes = 2_000_000;
 
@@ -89,15 +99,16 @@ public static class LogFile
         }
     }
 
-    /// <summary>追加一行槽位日志（可来自任意线程）：独立写入 slot.log，超 2MB 轮切。用于绑定/驱逐/KV Cache 事件追溯。</summary>
+    /// <summary>追加一行槽位日志（可来自任意线程）：独立写入 logs/slot.log，超 2MB 轮切。用于绑定/驱逐/KV Cache 事件追溯。</summary>
     public static void SlotAppend(string line)
     {
         lock (_gate)
         {
             try
             {
+                EnsureLogDir();
                 var stamped = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {line}";
-                var path = Path.Combine(AppContext.BaseDirectory, "slot.log");
+                var path = Path.Combine(LogDir, "slot.log");
                 Rotate(path, MaxLogBytes);
                 File.AppendAllText(path, stamped + Environment.NewLine);
             }
@@ -108,18 +119,20 @@ public static class LogFile
         }
     }
 
-    /// <summary>写主日志 harness.log，超限时轮切为 harness.log.1。</summary>
+    /// <summary>写主日志 logs/harness.log，超限时轮切为 harness.log.1。</summary>
     private static void AppendMain(string stampedLine)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "harness.log");
+        EnsureLogDir();
+        var path = Path.Combine(LogDir, "harness.log");
         Rotate(path, MaxLogBytes);
         File.AppendAllText(path, stampedLine + Environment.NewLine);
     }
 
-    /// <summary>写警告/错误日志 warn_error.log：前 10 条上下文 + 分隔标记 + 本条。</summary>
+    /// <summary>写警告/错误日志 logs/warn_error.log：前 10 条上下文 + 分隔标记 + 本条。</summary>
     private static void AppendWarnError(Level lvl, string stampedLine)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "warn_error.log");
+        EnsureLogDir();
+        var path = Path.Combine(LogDir, "warn_error.log");
         Rotate(path, MaxWarnBytes);
         var sb = new System.Text.StringBuilder();
         foreach (var l in _recent)

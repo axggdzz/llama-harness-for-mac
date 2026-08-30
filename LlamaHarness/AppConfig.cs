@@ -53,7 +53,8 @@ public class AppConfig
     /// <summary>请求体 dump 开关（应用识别分析用）：每个 POST 的原始 body + headers 落盘 request_dump.log。默认关闭——防 prompt 隐私落盘与无谓 IO（审计 O-18）。</summary>
     public bool RequestDumpEnabled { get; set; } = false;
 
-    private static string ConfigPath => Path.Combine(AppContext.BaseDirectory, "config.json");
+    /// <summary>配置文件路径：项目目录下 config/config.json。</summary>
+    private static string ConfigPath => Path.Combine(AppContext.BaseDirectory, "config", "config.json");
 
     /// <summary>审计：config.json 字段命名统一 snake_case_lower（此前仅 schema_version 为 snake，其余 PascalCase）。</summary>
     private sealed class SnakeCaseNamingPolicy : System.Text.Json.JsonNamingPolicy
@@ -83,6 +84,13 @@ public class AppConfig
 
     /// <summary>旧版 config.json 为 PascalCase 字段名：仅用于兼容读取；保存一律写新 snake_case 格式。</summary>
     private static readonly JsonSerializerOptions LegacyJsonOpts = new() { WriteIndented = true };
+
+    /// <summary>确保 config/ 目录存在（幂等）。</summary>
+    private static void EnsureConfigDir()
+    {
+        var dir = Path.Combine(AppContext.BaseDirectory, "config");
+        if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+    }
 
     /// <summary>加载配置；文件不存在返回默认值，损坏则回退默认值并通过 out 报告错误。</summary>
     public static AppConfig Load(out string? loadError)
@@ -127,12 +135,13 @@ public class AppConfig
     /// <summary>输入预算下限（防止极端配置下预算 ≤0 导致全部请求被裁剪）。</summary>
     public const int MinInputBudgetTokens = 1024;
 
-    /// <summary>保存配置到程序目录（临时文件 + 重命名原子写入，防半截文件损坏），返回是否成功。</summary>
+    /// <summary>保存配置到 config/ 目录（临时文件 + 重命名原子写入，防半截文件损坏），返回是否成功。</summary>
     public bool Save(out string? error)
     {
         error = null;
         try
         {
+            EnsureConfigDir();
             var tmp = ConfigPath + ".tmp";
             File.WriteAllText(tmp, JsonSerializer.Serialize(this, JsonOpts));
             File.Move(tmp, ConfigPath, overwrite: true);
