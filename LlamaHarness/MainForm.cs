@@ -411,7 +411,7 @@ public class MainForm : Form
         void AddRow(Control c, int h)
         {
             int row = grid.RowStyles.Count;
-            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize, h));
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, h)); // 固定行高（px），不随内容拉伸
             c.Dock = DockStyle.Fill; // 撑满中列 → 宽度统一
             grid.Controls.Add(c, 1, row);
         }
@@ -645,7 +645,7 @@ public class MainForm : Form
         container.Controls.Add(tabStrip); // Dock Top，后添加 → 位于最上
         SelectTab(0);
 
-        // 四周等宽边距（Percent 列/行：居中 + 四边间距相等，窗口放大时边距等比缩放）
+        // 四周等宽边距（固定 px：左右/上下各 16px，绝对值不随窗口缩放变化，始终等宽）
         var pad = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -654,12 +654,12 @@ public class MainForm : Form
             Margin = new Padding(0),
             Padding = new Padding(0),
         };
-        pad.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 4));   // 左边距
-        pad.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 92));  // 内容
-        pad.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 4));   // 右边距
-        pad.RowStyles.Add(new RowStyle(SizeType.Percent, 4));     // 上边距
-        pad.RowStyles.Add(new RowStyle(SizeType.Percent, 92));    // 内容
-        pad.RowStyles.Add(new RowStyle(SizeType.Percent, 4));     // 下边距
+        pad.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 16));  // 左边距（固定 16px）
+        pad.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));  // 内容（剩余全部）
+        pad.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 16));  // 右边距（固定 16px）
+        pad.RowStyles.Add(new RowStyle(SizeType.Absolute, 16));    // 上边距（固定 16px）
+        pad.RowStyles.Add(new RowStyle(SizeType.Percent, 100));    // 内容（剩余全部）
+        pad.RowStyles.Add(new RowStyle(SizeType.Absolute, 16));    // 下边距（固定 16px）
         pad.Controls.Add(container, 1, 1);
         return pad;
     }
