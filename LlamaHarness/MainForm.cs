@@ -64,6 +64,11 @@ public class MainForm : Form
     private readonly CheckBox _chkAutoPreWebui = new() { Text = "WebUI", AutoSize = true, ForeColor = Color.FromArgb(200, 200, 200) };
     private readonly CheckBox _chkAutoPreTrae = new() { Text = "Trae", AutoSize = true, ForeColor = Color.FromArgb(200, 200, 200) };
     private readonly CheckBox _chkAutoPreDshAgent = new() { Text = "DSH Agent", AutoSize = true, ForeColor = Color.FromArgb(200, 200, 200) };
+    // 自动快照恢复（仅快照持久化，不锁槽）：前缀匹配 → 首请求存档 + Warming eager restore；不参与强占/驱逐拒绝
+    private readonly CheckBox _chkSnapDshRule = new() { Text = "DSH规则", AutoSize = true, ForeColor = Color.FromArgb(200, 200, 200) };
+    private readonly CheckBox _chkSnapWebui = new() { Text = "WebUI", AutoSize = true, ForeColor = Color.FromArgb(200, 200, 200) };
+    private readonly CheckBox _chkSnapTrae = new() { Text = "Trae", AutoSize = true, ForeColor = Color.FromArgb(200, 200, 200) };
+    private readonly CheckBox _chkSnapDshAgent = new() { Text = "DSH Agent", AutoSize = true, ForeColor = Color.FromArgb(200, 200, 200) };
     private readonly ToolTip _tooltip = new();
 
     // —— 操作按钮（Control Panel 区）——
@@ -524,6 +529,7 @@ public class MainForm : Form
             _chkContinuation, _numMaxContinuations, _numContTimeout,
             _chkCrashRecover, _numMaxRestarts,
             _chkAutoPreDshRule, _chkAutoPreWebui, _chkAutoPreTrae, _chkAutoPreDshAgent,
+            _chkSnapDshRule, _chkSnapWebui, _chkSnapTrae, _chkSnapDshAgent,
             _btnExportCfg, _btnImportCfg, // 运行中禁止导入/导出，避免改参冲突
         };
 
@@ -1411,7 +1417,7 @@ public class MainForm : Form
         // 文字框白字（禁用时也保持白字，清晰）+ CheckBox 勾改黑
         foreach (var c in new[] { _txtExe, _txtModel, _txtExtra, _txtPcoreMask, _txtKvCachePath, _txtLoadMode, _txtCacheTypeKv, _txtSpecType })
             if (c is TextBox tb) tb.ForeColor = Color.White;
-        foreach (var c in new[] { _chkNoKv, _chkAuto, _chkForceStream, _chkTokenGuard, _chkContinuation, _chkCrashRecover, _chkFlashAttn, _chkRequestDump, _chkAutoPreDshRule, _chkAutoPreWebui, _chkAutoPreTrae, _chkAutoPreDshAgent })
+        foreach (var c in new[] { _chkNoKv, _chkAuto, _chkForceStream, _chkTokenGuard, _chkContinuation, _chkCrashRecover, _chkFlashAttn, _chkRequestDump, _chkAutoPreDshRule, _chkAutoPreWebui, _chkAutoPreTrae, _chkAutoPreDshAgent, _chkSnapDshRule, _chkSnapWebui, _chkSnapTrae, _chkSnapDshAgent })
             ApplyBlackCheck(c);
 
         var panel = new TableLayoutPanel
@@ -1485,6 +1491,12 @@ public class MainForm : Form
         autoPreFlow.Controls.Add(_chkAutoPreTrae);
         autoPreFlow.Controls.Add(_chkAutoPreDshAgent);
         AddRow("自动强占:", autoPreFlow, null);
+        var snapFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, BackColor = Color.Transparent };
+        snapFlow.Controls.Add(_chkSnapDshRule);
+        snapFlow.Controls.Add(_chkSnapWebui);
+        snapFlow.Controls.Add(_chkSnapTrae);
+        snapFlow.Controls.Add(_chkSnapDshAgent);
+        AddRow("自动快照:", snapFlow, null);
         // 模式行：标签 + CheckBox 同行（AutoSize 让 CheckBox 紧跟标签，不再撑满整行）
         var chkAutoRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, BackColor = Color.Transparent };
         chkAutoRow.Controls.Add(_chkAuto);
@@ -1513,6 +1525,10 @@ public class MainForm : Form
         _tooltip.SetToolTip(_chkAutoPreWebui, "勾选后 WebUI 会话（webui_*）槽位自动强占：空闲不被 LRU 驱逐。");
         _tooltip.SetToolTip(_chkAutoPreTrae, "勾选后 Trae Work（trae_global）槽位自动强占：空闲不被 LRU 驱逐。");
         _tooltip.SetToolTip(_chkAutoPreDshAgent, "勾选后 DSH 主 Agent（dsh_agent_global）槽位自动强占：空闲不被 LRU 驱逐。注意 parallel=2 时若两槽都被强占，新会话将排队等待（上限 30s）。");
+        _tooltip.SetToolTip(_chkSnapDshRule, "勾选后 DSH 规则引擎会话（dsh_rule_*）启用自动快照恢复：首请求存档 + 唤醒 eager restore；不锁槽，可被其他应用正常驱逐。");
+        _tooltip.SetToolTip(_chkSnapWebui, "勾选后 WebUI 会话（webui_*）启用自动快照恢复：首请求存档 + 唤醒 eager restore；不锁槽，可被其他应用正常驱逐。");
+        _tooltip.SetToolTip(_chkSnapTrae, "勾选后 Trae Work（trae_global）启用自动快照恢复：首请求存档 + 唤醒 eager restore；不锁槽，可被其他应用正常驱逐。");
+        _tooltip.SetToolTip(_chkSnapDshAgent, "勾选后 DSH 主 Agent（dsh_agent_global）启用自动快照恢复：首请求存档 + 唤醒 eager restore；不锁槽，可被其他应用正常驱逐。");
 
         return panel;
     }
@@ -1593,6 +1609,12 @@ public class MainForm : Form
         _chkAutoPreWebui.Checked = autoPreSet.Contains("webui");
         _chkAutoPreTrae.Checked = autoPreSet.Contains("trae_global");
         _chkAutoPreDshAgent.Checked = autoPreSet.Contains("dsh_agent_global");
+        var snapSet = new HashSet<string>(cfg.AutoSnapshotKeys.Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => s.Trim()), StringComparer.OrdinalIgnoreCase);
+        _chkSnapDshRule.Checked = snapSet.Contains("dsh_rule");
+        _chkSnapWebui.Checked = snapSet.Contains("webui");
+        _chkSnapTrae.Checked = snapSet.Contains("trae_global");
+        _chkSnapDshAgent.Checked = snapSet.Contains("dsh_agent_global");
     }
 
     /// <summary>智能模式下监听器占用前端端口，改端口需重绑，监听中禁止编辑。</summary>
@@ -1637,6 +1659,12 @@ public class MainForm : Form
         if (_chkAutoPreTrae.Checked) autoPrePrefixes.Add("trae_global");
         if (_chkAutoPreDshAgent.Checked) autoPrePrefixes.Add("dsh_agent_global");
         _config.AutoPreemptiveApps = string.Join(",", autoPrePrefixes);
+        var snapPrefixes = new List<string>();
+        if (_chkSnapDshRule.Checked) snapPrefixes.Add("dsh_rule");
+        if (_chkSnapWebui.Checked) snapPrefixes.Add("webui");
+        if (_chkSnapTrae.Checked) snapPrefixes.Add("trae_global");
+        if (_chkSnapDshAgent.Checked) snapPrefixes.Add("dsh_agent_global");
+        _config.AutoSnapshotKeys = string.Join(",", snapPrefixes);
     }
 
     /// <summary>自动查找 llama-server.exe：配置路径无效时用搜索结果回填。</summary>
@@ -1731,6 +1759,10 @@ public class MainForm : Form
         _chkAutoPreWebui.CheckedChanged += OnParamEdited;
         _chkAutoPreTrae.CheckedChanged += OnParamEdited;
         _chkAutoPreDshAgent.CheckedChanged += OnParamEdited;
+        _chkSnapDshRule.CheckedChanged += OnParamEdited;
+        _chkSnapWebui.CheckedChanged += OnParamEdited;
+        _chkSnapTrae.CheckedChanged += OnParamEdited;
+        _chkSnapDshAgent.CheckedChanged += OnParamEdited;
         _numIdleMin.ValueChanged += OnIdleEdited;
         _chkAuto.CheckedChanged += OnAutoModeEdited;
 
@@ -2198,7 +2230,7 @@ public class MainForm : Form
 
         // CheckBox 禁用时同步刷新为灰（启用时恢复黑）
         var checkColor = busy ? Color.FromArgb(0x88, 0x88, 0x88) : Color.Black;
-        foreach (var c in new[] { _chkNoKv, _chkAuto, _chkForceStream, _chkTokenGuard, _chkContinuation, _chkCrashRecover, _chkAutoPreDshRule, _chkAutoPreWebui, _chkAutoPreTrae, _chkAutoPreDshAgent })
+        foreach (var c in new[] { _chkNoKv, _chkAuto, _chkForceStream, _chkTokenGuard, _chkContinuation, _chkCrashRecover, _chkAutoPreDshRule, _chkAutoPreWebui, _chkAutoPreTrae, _chkAutoPreDshAgent, _chkSnapDshRule, _chkSnapWebui, _chkSnapTrae, _chkSnapDshAgent })
             if (c is CheckBox cb)
                 cb.ForeColor = checkColor;
     }

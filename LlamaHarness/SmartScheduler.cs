@@ -611,13 +611,13 @@ public sealed class SmartScheduler : IDisposable
         var kv = _kvCache;
         var aff = _affinity;
         if (aff == null) return; // 理论不可达（WakeUpAsync 在 Warming 前已赋值），防御性早退
-        // eager restore：已绑定槽位且有磁盘快照的 autoPre key → 立即恢复 KV（成功记入 _servedKeysThisRun 防首请求重复 restore）
+        // eager restore：已绑定槽位且有磁盘快照的自动快照 key → 立即恢复 KV（成功记入 _servedKeysThisRun 防首请求重复 restore）
         if (kv != null)
         {
             foreach (var b in aff.Snapshot()) // (Key, App, Slot, LastActive, Preemptive, KvCache)
             {
                 if (ct.IsCancellationRequested) break;
-                if (!b.KvCache || !IsAutoPreKey(b.Key) || !kv.HasCache(b.Key)) continue;
+                if (!b.KvCache || !IsAutoSnapshotKey(b.Key) || !kv.HasCache(b.Key)) continue;
                 try
                 {
                     var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -1002,10 +1002,10 @@ public sealed class SmartScheduler : IDisposable
                     }
                 }
 
-                // 1.1 首请求存档：autoPre key 首次真实 prefill 完成后立即落盘快照（每唤醒周期一次），
+                // 1.1 首请求存档：自动快照 key 首次真实 prefill 完成后立即落盘快照（每唤醒周期一次），
                 // 防进程崩溃未休眠时磁盘快照停留在旧状态（缺最新 KV）。失败不阻塞主流程，下请求重试。
                 if (completed && routedKey != null && _kvCache != null && routedSlot is int saveSlot
-                    && IsAutoPreKey(routedKey))
+                    && IsAutoSnapshotKey(routedKey))
                 {
                     bool alreadySaved;
                     lock (_kvStateGate) alreadySaved = _savedKeysThisRun.Contains(routedKey);
@@ -1144,10 +1144,23 @@ public sealed class SmartScheduler : IDisposable
             .Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
     }
 
-    /// <summary>判定亲和 key 是否匹配任一自动强占前缀（1.1 首请求存档条件，public 供测试）。</summary>
+    /// <summary>判定亲和 key 是否匹配任一自动强占前缀（§4.2 槽位冻结语义，public 供测试）。</summary>
     public bool IsAutoPreKey(string key)
     {
         return ParseAutoPreemptivePrefixes().Any(p => key.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>解析 AutoSnapshotKeys 配置为前缀集合（仅快照持久化：首请求存档 + Warming eager restore，不锁槽）。</summary>
+    private List<string> ParseAutoSnapshotPrefixes()
+    {
+        return _cfg.AutoSnapshotKeys.Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
+    }
+
+    /// <summary>判定亲和 key 是否匹配任一自动快照前缀（1.1 首请求存档 / 3.2 Warming eager restore 条件；不参与强占/驱逐拒绝，public 供测试）。</summary>
+    public bool IsAutoSnapshotKey(string key)
+    {
+        return ParseAutoSnapshotPrefixes().Any(p => key.StartsWith(p, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>§4.5 Tool 链检测：messages 末条 role=tool → agent 工具循环进行中（框架刚回填 tool_result、等待模型响应）。

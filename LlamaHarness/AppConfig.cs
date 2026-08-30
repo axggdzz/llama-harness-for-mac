@@ -66,6 +66,8 @@ public class AppConfig
     public int RecoveryKeepAliveIntervalSeconds { get; set; } = 5;
     /// <summary>自动强占（冻结防驱逐）的应用类型前缀，逗号分隔。key 匹配任一前缀 → 槽位不可被 LRU 驱逐（§4.2）。默认持久 Agent 会话类。</summary>
     public string AutoPreemptiveApps { get; set; } = "dsh_agent_global,trae_global";
+    /// <summary>自动快照 key（仅快照持久化，不锁槽）：逗号分隔前缀。key 匹配任一前缀 → 首请求存档 + Warming eager restore；不参与槽位强占/驱逐拒绝（与 AutoPreemptiveApps 解耦）。默认 trae_global。</summary>
+    public string AutoSnapshotKeys { get; set; } = "trae_global";
     /// <summary>请求体 dump 开关（应用识别分析用）：每个 POST 的原始 body + headers 落盘 request_dump.log。默认关闭——防 prompt 隐私落盘与无谓 IO（审计 O-18）。</summary>
     public bool RequestDumpEnabled { get; set; } = false;
 
