@@ -110,7 +110,16 @@ public sealed class SlotAffinity
         {
             if (_bindings.TryGetValue(key, out var b))
             {
-                _bindings[key] = new Binding { Slot = b.Slot, LastActive = DateTime.Now, Preemptive = b.Preemptive || autoPre, KvCache = b.KvCache };
+                // 已有绑定刷新：autoPre 想设强占，但若当前非强占且 cap 已满 → 不设（防"启动裁剪→下次请求又变回强占"死循环）
+                bool newPre = b.Preemptive || autoPre;
+                if (newPre && !b.Preemptive)
+                {
+                    int cap = Math.Max(0, _slotCount - 1);
+                    int preemptiveCount = _bindings.Count(kv => kv.Value.Preemptive);
+                    if (preemptiveCount >= cap)
+                        newPre = false; // cap 已满：放弃强占，走 LRU 驱逐
+                }
+                _bindings[key] = new Binding { Slot = b.Slot, LastActive = DateTime.Now, Preemptive = newPre, KvCache = b.KvCache };
                 return (b.Slot, key, false, null, -1, false);
             }
 
@@ -186,7 +195,17 @@ public sealed class SlotAffinity
                 }
             }
         }
-        _bindings[key] = new Binding { Slot = slot!.Value, LastActive = DateTime.Now, Preemptive = autoPre, KvCache = true };
+        // 新建绑定时同样检查 cap（防"驱逐了一个强占又建一个新的强占"导致 cap 失效）
+        bool finalPre = autoPre;
+        if (finalPre)
+        {
+            int cap = Math.Max(0, _slotCount - 1);
+            // 此时 victim 已被移除，preemptiveCount 是移除后的值
+            int preemptiveCount = _bindings.Count(kv => kv.Value.Preemptive);
+            if (preemptiveCount >= cap)
+                finalPre = false; // cap 已满：放弃强占，走 LRU 驱逐
+        }
+        _bindings[key] = new Binding { Slot = slot!.Value, LastActive = DateTime.Now, Preemptive = finalPre, KvCache = true };
         Save();
         return (slot.Value, evicted, evictedSlot, evictedKvCache);
     }
