@@ -44,39 +44,32 @@ public static class TokenGuard
     }
 
     /// <summary>
-    /// 主入口：检查 + 裁剪 chat/completions 请求体。
-    /// 预算内 → (true, 原body, null)；裁剪成功 → (true, 新body, 日志说明)；
-    /// 最小集仍超预算 → (false, null, 错误信息)，调用方返回 400。
+    /// 核心实现（DOM 版，E-1）：原地裁剪 root["messages"]，无中间 parse/serialize。
+    /// 热路径（PrepareGatewayAsync）复用同一棵 DOM，管道末端统一序列化一次。
+    /// 返回 (Ok, Modified, Note)：Modified=false → 调用方可直接用原 body；true → 需序列化 root。
+    /// countTokens 可注入（单测用假计数器）；默认走后端 /v1/tokenize。
     /// </summary>
-    public static async Task<(bool Ok, string? Body, string? Note)> GuardAsync(
-        HttpClient hc, int backendPort, string body, int budget)
+    public static async Task<(bool Ok, bool Modified, string? Note)> GuardAsync(
+        JsonObject root, HttpClient hc, int backendPort, int budget,
+        Func<string, Task<int?>>? countTokens = null)
     {
-        // 解析 body 提取 messages（非 JSON / 无 messages → 透传）
-        JsonObject root;
-        JsonArray? messages;
-        try
-        {
-            root = JsonNode.Parse(body)?.AsObject() ?? throw new InvalidOperationException();
-            messages = root["messages"] as JsonArray;
-        }
-        catch
-        {
-            return (true, body, null);
-        }
-        if (messages == null || messages.Count == 0) return (true, body, null);
+        var messages = root["messages"] as JsonArray;
+        if (messages == null || messages.Count == 0) return (true, false, null);
+
+        Func<string, Task<int?>> counter = countTokens ?? ((string t) => CountTokensAsync(hc, backendPort, t));
 
         // O-14：计数口径对齐——送 messages 文本（role+content）tokenize，而非原始 body（含 model/temperature 等非上下文字段，计数偏高）
-        int count = await CountTokensAsync(hc, backendPort, BuildMessagesText(messages)) ?? -1;
-        if (count < 0) return (true, body, null); // tokenize 失败：降级原样转发
+        int count = await counter(BuildMessagesText(messages)) ?? -1;
+        if (count < 0) return (true, false, null); // tokenize 失败：降级原样转发
         int origCount = count;
-        if (count <= budget) return (true, body, null);
+        if (count <= budget) return (true, false, null);
 
         // ── 轮次制裁剪 ──
         // 一轮 = user 消息 + 其后到下一个 user 之前的 assistant/tool 消息（整体删除，保 tool_call 配对）。
         // 最小保留集：首个 user 之前的全部消息（system 等）+ 最后一轮（最后 user → 末尾）。
         int firstUser = FirstIndexOfRole(messages, "user");
         int lastUser = LastIndexOfRole(messages, "user");
-        if (firstUser < 0) return (true, body, null); // 无 user 消息：无可裁
+        if (firstUser < 0) return (true, false, null); // 无 user 消息：无可裁
 
         var turnStarts = new List<int>();
         for (int i = firstUser; i <= lastUser; i++)
@@ -90,12 +83,12 @@ public static class TokenGuard
             for (int i = end - 1; i >= start; i--) messages.RemoveAt(i);
             turnStarts.RemoveAt(0);
             deletedTurns++;
-            body = root.ToJsonString();
-            count = await CountTokensAsync(hc, backendPort, BuildMessagesText(messages)) ?? -1;
-            if (count < 0) return (true, body, null); // 中途降级：用当前状态
+            count = await counter(BuildMessagesText(messages)) ?? -1;
+            if (count < 0) return (true, deletedTurns > 0, null); // 中途降级：用当前状态
         }
 
         // ── 内容兜底 ── 最小集仍超 → 截断最大消息内容（巨型 tool_result 等）
+        bool contentTruncated = false;
         if (count > budget)
         {
             for (int iter = 0; iter < 10 && count > budget; iter++)
@@ -110,20 +103,45 @@ public static class TokenGuard
                 int tail = newLen - half;
                 string kept = content[..half] + "\n[…]\n" + content[^tail..];
                 SetContent(messages[maxIdx], kept + "\n[已截断 - Token Guard]");
-                body = root.ToJsonString();
-                count = await CountTokensAsync(hc, backendPort, BuildMessagesText(messages)) ?? -1;
-                if (count < 0) return (true, body, null);
+                contentTruncated = true;
+                count = await counter(BuildMessagesText(messages)) ?? -1;
+                if (count < 0) return (true, deletedTurns > 0 || contentTruncated, null);
             }
         }
 
+        bool modified = deletedTurns > 0 || contentTruncated;
         if (count > budget)
         {
             var err = $"Token Guard：裁剪后仍 {count} tokens，超预算 {budget}。请缩短输入。";
-            return (false, null, err);
+            return (false, modified, err);
         }
 
         var note = $"Token Guard：估算 {origCount} tokens > 预算 {budget}，删除 {deletedTurns} 轮对话，最终 {count} tokens";
-        return (true, body, note);
+        return (true, modified, note);
+    }
+
+    /// <summary>
+    /// 主入口（string 版，供崩溃恢复/续接等非热路径）：parse 一次 → 核心实现 → 按需序列化一次。
+    /// 预算内 → (true, 原body, null)；裁剪成功 → (true, 新body, 日志说明)；
+    /// 最小集仍超预算 → (false, null, 错误信息)，调用方返回 400。
+    /// </summary>
+    public static async Task<(bool Ok, string? Body, string? Note)> GuardAsync(
+        HttpClient hc, int backendPort, string body, int budget)
+    {
+        // 解析 body 提取 messages（非 JSON / 无 messages → 透传）
+        JsonObject? root;
+        try
+        {
+            root = JsonNode.Parse(body)?.AsObject();
+        }
+        catch
+        {
+            return (true, body, null);
+        }
+        if (root == null) return (true, body, null);
+
+        var (ok, modified, note) = await GuardAsync(root, hc, backendPort, budget);
+        return (ok, ok ? (modified ? root.ToJsonString() : body) : null, note);
     }
 
     // ── 辅助 ──

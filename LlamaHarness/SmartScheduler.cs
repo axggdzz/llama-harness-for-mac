@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json.Nodes;
 
 namespace LlamaHarness;
 
@@ -601,11 +602,17 @@ public sealed class SmartScheduler : IDisposable
             return null; // 非推理请求：不做网关处理（finalBody=null 走纯透传管道）
 
         string body = System.Text.Encoding.UTF8.GetString(bodyBytes);
+
+        // E-1/E-3：入口一次性解析 → 后续所有阶段复用同一棵 DOM，管道末端只序列化一次。
+        // 解析失败（非法 JSON）→ root=null → 跳过全部 DOM 改写、原样透传（等价于旧实现各方法 try-catch 透传）。
+        JsonObject? root = null;
+        try { root = JsonNode.Parse(body)?.AsObject(); } catch { /* 非法 JSON */ }
+
         int? routedSlot = null;
         string? routedKey = null;
 
         // 思考模式拦截（仅 chat/completions）：识别指令 / 注入 reasoning_effort + enable_thinking / 校验修正非法档位
-        if (IsChatCompletions(p))
+        if (IsChatCompletions(p) && root != null)
         {
             ThinkingLevel lvl, prev;
             bool changed;
@@ -614,19 +621,10 @@ public sealed class SmartScheduler : IDisposable
             {
                 prev = _thinkingMode;
                 lvl = _thinkingMode;
-                var injected = InjectThinkingMode(body, ref lvl, out effortFix);
-                if (injected != null)
-                {
-                    body = injected;
-                    changed = lvl != prev;
-                    _thinkingMode = lvl;
-                }
-                else
-                {
-                    changed = false;
-                }
+                InjectThinkingMode(root, ref lvl, out effortFix); // DOM 版：原地改树，不再 parse/serialize
+                changed = lvl != prev;
+                _thinkingMode = lvl;
             }
-            bodyBytes = System.Text.Encoding.UTF8.GetBytes(body);
             if (changed)
             {
                 Log?.Invoke($"思考模式已切换为「{LabelOf(lvl)}」（{(EffortOf(lvl) is var e && e != null ? $"reasoning_effort={e}, " : "")}enable_thinking={(lvl == ThinkingLevel.Off ? "false" : "true")}）。");
@@ -640,46 +638,51 @@ public sealed class SmartScheduler : IDisposable
         var aff = _affinity;
         if (aff != null && p.Contains("completion", StringComparison.OrdinalIgnoreCase))
         {
-            (body, bodyBytes, routedSlot, routedKey) =
-                await ApplySlotAffinityAsync(req, aff, body, bodyBytes);
+            (routedSlot, routedKey) = await ApplySlotAffinityAsync(req, aff, root);
         }
 
         // Token Guard（仅 chat/completions）：预估算 + 裁剪，防 "exceeds context size" 400
-        if (IsChatCompletions(p) && _cfg.TokenGuardEnabled)
+        if (IsChatCompletions(p) && _cfg.TokenGuardEnabled && root != null)
         {
             var budget = _cfg.GetInputBudget(); // 多槽均分总容量：每槽有效上下文 = CtxSize ÷ Parallel；再减输出预留
-            var (ok, newBody, note) = await TokenGuard.GuardAsync(_hc, _backendPort, body, budget);
+            var (ok, _, note) = await TokenGuard.GuardAsync(root, _hc, _backendPort, budget); // Modified 无需：root 原地已改，末端统一序列化
             if (!ok)
             {
                 Log?.Invoke($"Token Guard 拒绝：{note}");
                 WriteError(ctx, 400, note ?? "上下文超长");
                 return null;
             }
-            if (newBody != null && newBody != body)
-            {
-                body = newBody;
-                bodyBytes = System.Text.Encoding.UTF8.GetBytes(body);
-                if (note != null) Log?.Invoke(note);
-            }
+            if (note != null) Log?.Invoke(note);
         }
 
         // 非流式请求检测 + 可选强制流式改写：
         // 非流式时 llama-server 会缓存整个响应直到生成完毕才返回，期间无任何字节流动，
         // 客户端读超时→断开→agent 重试全量上下文→重新预填。流式则边生成边发字节，不会读超时。
-        bool streaming = System.Text.RegularExpressions.Regex.IsMatch(body, @"""stream""\s*:\s*true");
+        bool streaming;
+        if (root != null)
+        {
+            // DOM 直读替代对数 MB body 的正则扫描（E-1）
+            streaming = false;
+            try { if (root["stream"]?.GetValue<bool>() == true) streaming = true; } catch { /* 非 bool 值：按 false */ }
+        }
+        else
+            streaming = System.Text.RegularExpressions.Regex.IsMatch(body, @"""stream""\s*:\s*true");
+
         if (!streaming)
         {
             if (_cfg.ForceStream)
             {
-                var rewritten = EnsureStreamTrue(body);
-                if (rewritten != null)
+                if (root != null)
                 {
-                    bodyBytes = System.Text.Encoding.UTF8.GetBytes(rewritten);
+                    EnsureStreamTrue(root); // DOM 版：直接树上置 stream=true
                     Log?.Invoke("强制流式：已将非流式请求改写为 stream=true（SSE 直通）。");
                 }
                 else
                 {
-                    // C-005 降级：改写失败（非法 JSON）时透传原始请求，禁止下发损坏 JSON
+                    // C-005 降级：非法 JSON 走字符串级改写；改写失败透传原始请求，禁止下发损坏 JSON
+                    var rewritten = EnsureStreamTrue(body);
+                    if (rewritten != null)
+                        bodyBytes = System.Text.Encoding.UTF8.GetBytes(rewritten);
                     Log?.Invoke("警告：强制流式改写失败（请求体不是合法 JSON），已透传原始请求。");
                 }
             }
@@ -691,15 +694,23 @@ public sealed class SmartScheduler : IDisposable
 
         // §8 可观测：前缀哈希 HIT/MISS 判定（原生 KV 前缀复用；TokenGuard 之后按实际下发体计算）
         if (routedKey != null)
-            LogPrefixHash(routedKey, body);
+            LogPrefixHash(routedKey, root);
+
+        // 管道末端：唯一一次序列化 + 编码转换（E-1/E-3）
+        if (root != null)
+        {
+            body = root.ToJsonString();
+            bodyBytes = System.Text.Encoding.UTF8.GetBytes(body);
+        }
 
         return (bodyBytes, body, streaming || _cfg.ForceStream, routedSlot, routedKey);
     }
 
     /// <summary>槽位亲和阶段：指纹绑定（LRU 驱逐 / §4.2 自动强占）→ §4.5 Tool 链锁定 → 驱逐前 KV save → restore 自愈 → n_slots 注入。
-    /// 返回（改写后 body、bodyBytes、路由槽位、绑定 key）。</summary>
-    private async Task<(string Body, byte[] BodyBytes, int? RoutedSlot, string? RoutedKey)> ApplySlotAffinityAsync(
-        HttpListenerRequest req, SlotAffinity aff, string body, byte[] bodyBytes)
+    /// E-1：直接操作调用方持有的同一棵 DOM（root=null 时跳过 DOM 步骤，等价旧实现 parse 失败透传）。
+    /// 返回（路由槽位、绑定 key）。</summary>
+    private async Task<(int? RoutedSlot, string? RoutedKey)> ApplySlotAffinityAsync(
+        HttpListenerRequest req, SlotAffinity aff, JsonObject? root)
     {
         // §4.2 自动冻结：应用类型前缀在 AutoPreemptiveApps → 绑定强制强占（暂停 LRU 驱逐）
         var autoPre = ParseAutoPreemptivePrefixes();
@@ -708,9 +719,9 @@ public sealed class SmartScheduler : IDisposable
         string? routedKey = key;
 
         // §4.5 Tool 链会话锁定：末条消息 role=tool → agent 工具循环进行中 → 锁槽位防驱逐；循环结束自动解锁
-        if (key != null)
+        if (key != null && root != null)
         {
-            bool inToolLoop = DetectToolLoop(body);
+            bool inToolLoop = DetectToolLoop(root);
             bool didLock = false, didUnlock = false;
             // O-15：锁内只做 _toolLockedKeys 集合判定；aff 调用（自带内部锁 + 文件 I/O）全部移出，消除锁嵌套
             bool alreadyPreemptive = aff.IsPreemptive(key);
@@ -799,13 +810,10 @@ public sealed class SmartScheduler : IDisposable
             EmitSlot(evt);
             SlotBindingChanged?.Invoke();
         }
-        var injected = InjectNSlots(body, slot);
-        if (injected != null)
-        {
-            body = injected;
-            bodyBytes = System.Text.Encoding.UTF8.GetBytes(body);
-        }
-        return (body, bodyBytes, routedSlot, routedKey);
+        // E-1：n_slots 注入直接改树（已有 n_slots 时不覆盖，尊重客户端显式指定）
+        if (root != null)
+            InjectNSlots(root, slot);
+        return (routedSlot, routedKey);
     }
 
     /// <summary>转发阶段：构造后端请求（过滤逐跳头）→ 连接异常 500ms 重试一次 → 响应管道 → 崩溃恢复 / 断点快照清理 → 客户端断开兜底。</summary>
@@ -981,13 +989,13 @@ public sealed class SmartScheduler : IDisposable
     }
 
     /// <summary>§4.5 Tool 链检测：messages 末条 role=tool → agent 工具循环进行中（框架刚回填 tool_result、等待模型响应）。
-    /// 历史中残留的旧 tool 消息不作为依据（循环结束后历史仍含 tool 消息，全量扫描会永久误锁）。</summary>
-    private static bool DetectToolLoop(string body)
+    /// 历史中残留的旧 tool 消息不作为依据（循环结束后历史仍含 tool 消息，全量扫描会永久误锁）。
+    /// E-1：直接读调用方持有的 DOM，不再单独 parse。</summary>
+    public static bool DetectToolLoop(JsonObject obj)
     {
         try
         {
-            var obj = System.Text.Json.Nodes.JsonNode.Parse(body)?.AsObject();
-            var msgs = obj?["messages"] as System.Text.Json.Nodes.JsonArray;
+            var msgs = obj["messages"] as System.Text.Json.Nodes.JsonArray;
             if (msgs == null || msgs.Count == 0) return false;
             return string.Equals(msgs[^1]?["role"]?.GetValue<string>(), "tool", StringComparison.OrdinalIgnoreCase); // 与 InjectThinkingMode 的 role 比较口径一致
         }
@@ -997,13 +1005,13 @@ public sealed class SmartScheduler : IDisposable
         }
     }
 
-    /// <summary>前缀指纹：SHA256(最新一轮之前的全部 messages JSON)。null = 无状态单轮请求（无比对基线）。</summary>
-    private static string? PrefixHash(string body)
+    /// <summary>前缀指纹：SHA256(最新一轮之前的全部 messages JSON)。null = 无状态单轮请求（无比对基线）。
+    /// E-1：直接读调用方持有的 DOM，不再单独 parse。</summary>
+    public static string? PrefixHash(JsonObject obj)
     {
         try
         {
-            var obj = System.Text.Json.Nodes.JsonNode.Parse(body)?.AsObject();
-            var msgs = obj?["messages"] as System.Text.Json.Nodes.JsonArray;
+            var msgs = obj["messages"] as System.Text.Json.Nodes.JsonArray;
             if (msgs == null || msgs.Count < 2) return null;
             // 前缀指纹 = 最新一轮之前的全部 messages 序列化拼接（无需克隆，逐元素 ToJsonString）
             var sb = new StringBuilder();
@@ -1020,9 +1028,9 @@ public sealed class SmartScheduler : IDisposable
     }
 
     /// <summary>§8 可观测：前缀哈希 HIT/MISS 判定。一致 → 原生 KV 前缀复用（增量 prefill）；不一致 → 全量重算。</summary>
-    private void LogPrefixHash(string key, string body)
+    private void LogPrefixHash(string key, JsonObject? root)
     {
-        var hash = PrefixHash(body);
+        var hash = root != null ? PrefixHash(root) : null;
         if (hash == null) return;
         lock (_kvStateGate)
         {
@@ -1372,7 +1380,10 @@ public sealed class SmartScheduler : IDisposable
                         "建议：Agent 侧启用流式（stream=true）或加大请求超时；也可在启动器开启「强制流式」。");
     }
 
-    /// <summary>把非流式请求体改写为 stream=true。
+    /// <summary>E-1 DOM 版：把非流式请求体改写为 stream=true——直接在树上置位（热路径复用同一棵树，无 parse/serialize）。</summary>
+    public static void EnsureStreamTrue(JsonObject obj) => obj["stream"] = true;
+
+    /// <summary>字符串降级版：仅当入口解析失败（root=null）时用于 C-005 兜底改写。
     /// C-005：优先 System.Text.Json DOM 解析修改（正确处理字符串内含 '}'、注释、格式化 JSON）；
     /// DOM 失败回退字符串 hack；两者都失败返回 null，调用方透传原始请求。</summary>
     public static string? EnsureStreamTrue(string json)
@@ -1413,13 +1424,12 @@ public sealed class SmartScheduler : IDisposable
     /// 3. 按状态机注入：Off → 显式 enable_thinking=false（Qwen3 混合思考模型默认会思考，
     ///    不显式关闭则仍输出 reasoning_content，导致下游 pi-ai 严格 JSON.parse 报 PI_AI_ERROR）；
     ///    Low/Medium/XHigh → 注入对应 reasoning_effort + enable_thinking=true。
-    /// DOM 解析失败时透传原始请求（返回 null）。
+    /// E-1 DOM 版：原地改树，复用调用方持有的同一棵树（无 parse/serialize）。
     /// </summary>
-    /// <param name="json">请求体 JSON</param>
+    /// <param name="obj">请求体 DOM（入口一次性解析）</param>
     /// <param name="level">当前全局思考档位（ref：指令命中时更新）</param>
     /// <param name="effortFix">清洗/注入描述（如 "已清洗客户端 reasoning_effort=high"）；null = 无需说明</param>
-    /// <returns>改写后的 JSON；null = 无需改写或解析失败，调用方透传。</returns>
-    public static string? InjectThinkingMode(string json, ref ThinkingLevel level, out string? effortFix)
+    public static void InjectThinkingMode(JsonObject obj, ref ThinkingLevel level, out string? effortFix)
     {
         effortFix = null;
         // 注意：不再有无改动的快速路径——Off 态也必须显式注入 enable_thinking=false，
@@ -1427,9 +1437,6 @@ public sealed class SmartScheduler : IDisposable
         // 思考文本混入 tool-call JSON 后导致 pi-ai 严格 JSON.parse 报 PI_AI_ERROR。
         try
         {
-            var node = System.Text.Json.Nodes.JsonNode.Parse(json);
-            if (node is not System.Text.Json.Nodes.JsonObject obj) return null;
-
             if (obj["messages"] is System.Text.Json.Nodes.JsonArray msgs && msgs.Count > 0)
             {
                 for (int i = msgs.Count - 1; i >= 0; i--)
@@ -1508,33 +1515,20 @@ public sealed class SmartScheduler : IDisposable
             // 清洗说明（用于日志）
             if (cleaned)
                 effortFix = "已清洗客户端思考参数（thinking/reasoning_effort/enable_thinking），按网关状态机重新注入";
-
-            // 每次解析成功都会改写（至少注入 enable_thinking），故始终返回改写后的 JSON
-            return obj.ToJsonString();
         }
         catch
         {
-            // DOM 解析失败（非法 JSON），透传原始请求
-            return null;
+            // 结构异常：尽力而为，保留已完成的改写（等价旧实现透传语义）
         }
     }
 
-    /// <summary>注入 n_slots 固定槽位路由（llama.cpp 多槽特性）。失败返回 null，调用方透传。</summary>
-    public static string? InjectNSlots(string json, int slot)
+    /// <summary>注入 n_slots 固定槽位路由（llama.cpp 多槽特性）。E-1 DOM 版：原地改树。
+    /// 已有 n_slots 时不覆盖（尊重客户端显式指定），返回 false。</summary>
+    public static bool InjectNSlots(JsonObject obj, int slot)
     {
-        try
-        {
-            var node = System.Text.Json.Nodes.JsonNode.Parse(json);
-            if (node is not System.Text.Json.Nodes.JsonObject obj) return null;
-            // 已有 n_slots 时不覆盖（尊重客户端显式指定）
-            if (obj["n_slots"] != null) return null;
-            obj["n_slots"] = new System.Text.Json.Nodes.JsonArray(slot);
-            return obj.ToJsonString();
-        }
-        catch
-        {
-            return null;
-        }
+        if (obj["n_slots"] != null) return false;
+        obj["n_slots"] = new System.Text.Json.Nodes.JsonArray(slot);
+        return true;
     }
 
     // ==================== 闲置休眠（15 分钟无请求自动释放） ====================
