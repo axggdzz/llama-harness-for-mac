@@ -1121,16 +1121,20 @@ public sealed class SmartScheduler : IDisposable
                             _kvCache.DeleteCache(routedKey);
                         }
                     }
+                }
 
-                    // 1.2 每轮条件式后台 save（RAMDisk 快照全权接管）：快照非新鲜（上一轮后 KV 有增量）→ 异步后台 save，
-                    // 不阻塞响应返回（零额外延迟）；成功 → 标记新鲜；失败 → [EDGE-CASE-SAVE-FAILED] + 废弃快照（下轮自动重试）。
-                    // 并发安全：KvCacheManager._inflightSaves 按 key 去重，与驱逐前/休眠前同步 save 共享在途任务。
+                // 1.2 每轮条件式后台 save（RAMDisk 快照全权接管）：快照非新鲜（上一轮后 KV 有增量）→ 异步后台 save，
+                // 不阻塞响应返回（零额外延迟）；成功 → 标记新鲜；失败 → [EDGE-CASE-SAVE-FAILED] + 废弃快照（下轮自动重试）。
+                // 并发安全：KvCacheManager._inflightSaves 按 key 去重，与驱逐前/休眠前同步 save 共享在途任务。
+                if (completed && routedKey != null && _kvCache != null && routedSlot is int bgSaveSlot
+                    && IsAutoSnapshotKey(routedKey))
+                {
                     bool fresh;
                     lock (_kvStateGate) fresh = _freshSnapshotKeys.Contains(routedKey);
                     if (!fresh)
                     {
                         var bgKey = routedKey;
-                        var bgSlot = saveSlot;
+                        var bgSlot = bgSaveSlot;
                         _ = Task.Run(async () =>
                         {
                             try
