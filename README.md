@@ -8,20 +8,20 @@ Llama Harness 是一个 WinForms 桌面应用，作为 llama.cpp（llama-server�
 
 - **双槽 KV 复用**：多槽并行推理，按请求指纹自动路由到固定槽位，最大化 KV 缓存命中率
 - **思考模式拦截**：运行时切换思考/极速模式，智能拦截思考链
-- **崩溃自愈**：bad\_alloc 自动恢复、进程崩溃熔断、GPU 显存 OOM 检测
+- **崩溃自愈**：bad_alloc 自动恢复、进程崩溃熔断、GPU 显存 OOM 检测
 - **手动资源监控**：CPU / 内存 / 显存 + llama.cpp 三接口（/slots /props /metrics）实时采集
 
 ## 功能特性
 
-| 模块   | 说明                                                     |
-| ---- | ------------------------------------------------------ |
-| 日志   | 实时请求日志、Token 统计、运行时长                                   |
-| 统计   | 请求数、Token 吞吐、成功率                                       |
-| 槽位绑定 | 按请求指纹（DSH规则/WebUI/Trae/DSH Agent）自动路由到固定槽位             |
-| 槽位管理 | 多槽状态管理、KV 缓存索引                                         |
+| 模块 | 说明 |
+|------|------|
+| 日志 | 实时请求日志、Token 统计、运行时长 |
+| 统计 | 请求数、Token 吞吐、成功率 |
+| 槽位绑定 | 按请求指纹（DSH规则/WebUI/Trae/DSH Agent）自动路由到固定槽位 |
+| 槽位管理 | 多槽状态管理、KV 缓存索引 |
 | 系统资源 | 手动刷新：CPU/内存/显存 + llama.cpp 三接口（/slots /props /metrics） |
-| 配置管理 | 模型路径、端口、ctx、并行槽数、线程、附加参数等                              |
-| 信息展示 | 使用说明、常见问题、更新内容（Markdown 渲染）                            |
+| 配置管理 | 模型路径、端口、ctx、并行槽数、线程、附加参数等 |
+| 信息展示 | 使用说明、常见问题、更新内容（Markdown 渲染） |
 
 ## 技术栈
 
@@ -83,25 +83,24 @@ msbuild LlamaHarness.sln /p:Configuration=Release
 
 配置文件位于 `config/config.json`：
 
-| 字段          | 说明                   | 示例                                           |
-| ----------- | -------------------- | -------------------------------------------- |
-| exe         | llama-server 可执行文件路径 | `D:\AI\llama.cpp\...\llama-server.exe`       |
-| model       | 模型文件路径               | `D:\AI\Models\Qwen3.8-27B-Ridge-3.7bpw.gguf` |
-| port        | 监听端口                 | `8080`                                       |
-| ctx         | 上下文长度                | `222882`                                     |
-| parallel    | 并行槽数                 | `2`                                          |
-| threads     | CPU 线程数              | `8`                                          |
-| extra\_args | 附加启动参数               | `--host 127.0.0.1 --batch-size 2048`         |
+| 字段 | 说明 | 示例 |
+|------|------|------|
+| exe | llama-server 可执行文件路径 | `D:\AI\llama.cpp\...\llama-server.exe` |
+| model | 模型文件路径 | `D:\AI\Models\Qwen3.8-27B-Ridge-3.7bpw.gguf` |
+| port | 监听端口 | `8080` |
+| ctx | 上下文长度 | `222882` |
+| parallel | 并行槽数 | `2` |
+| threads | CPU 线程数 | `8` |
+| extra_args | 附加启动参数 | `--host 127.0.0.1 --batch-size 2048` |
 
 ## 架构设计
 
 详见 [docs/架构设计说明书.md](docs/架构设计说明书.md)（v2.5）。
 
 核心模块：
-
 - **MainForm**：七页签 UI（日志/统计/槽位绑定/槽位管理/系统资源/配置管理/信息展示）
 - **SlotAffinity**：请求指纹识别 + 槽位路由（P1 DSH规则 → P2 WebUI → P3 Trae → P4 DSH Agent）
-- **CrashRecovery**：bad\_alloc 熔断 + GPU OOM 检测 + 自动重启
+- **CrashRecovery**：bad_alloc 熔断 + GPU OOM 检测 + 自动重启
 - **LlamaCppMonitor**：手动触发采集 /slots /props /metrics 三接口，并行请求、独立容错
 - **SystemMetrics**：CPU（GetSystemTimes）、内存（GlobalMemoryStatusEx）、显存（nvidia-smi）
 
