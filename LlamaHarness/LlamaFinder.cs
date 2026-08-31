@@ -79,6 +79,11 @@ public static class LlamaFinder
         sb.Append($" -c {cfg.CtxSize}");
         sb.Append($" -ngl {cfg.Ngl}");
         sb.Append($" --parallel {cfg.Parallel}");
+        // Prompt-Cache 管控（RAMDisk 快照全权接管模式）：--cache-ram 0 关闭内置主机内存 prompt-cache（消除 LRU 驱逐虚假 KV-MISS），
+        // --no-cache-idle-slots 禁止 release 后空闲 slot 自动存入 prompt cache。回滚旧双兜底模式：CacheRamMiB=8192 + NoCacheIdleSlots=false。
+        sb.Append($" --cache-ram {cfg.CacheRamMiB}");
+        if (cfg.NoCacheIdleSlots)
+            sb.Append(" --no-cache-idle-slots");
         // KV Cache 持久化：配置了缓存路径时，启用 /slots 端点 + 指定保存目录（单槽/多槽均需要）
         if (!string.IsNullOrWhiteSpace(cfg.KvCachePath))
         {

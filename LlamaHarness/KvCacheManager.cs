@@ -17,6 +17,8 @@ public sealed class KvCacheManager
     private readonly string _cachePath;
     private readonly int _slotCount;
     private readonly int _backendPort;
+    private readonly int _ctxSize;
+    private readonly Action<string>? _log;
     private readonly object _gate = new();
     private readonly Dictionary<string, Task> _inflightSaves = new(StringComparer.OrdinalIgnoreCase);
 
@@ -42,12 +44,14 @@ public sealed class KvCacheManager
         public long SizeBytes;
     }
 
-    public KvCacheManager(HttpClient http, string cachePath, int slotCount, int backendPort)
+    public KvCacheManager(HttpClient http, string cachePath, int slotCount, int backendPort, int ctxSize = 0, Action<string>? log = null)
     {
         _http = http;
         _cachePath = cachePath.TrimEnd('/');
         _slotCount = Math.Max(1, slotCount);
         _backendPort = backendPort;
+        _ctxSize = ctxSize;
+        _log = log;
         LoadIndex();
     }
 
@@ -78,13 +82,15 @@ public sealed class KvCacheManager
         }
     }
 
-    /// <summary>删除指定 key 的缓存文件 + 索引条目（§6.3：续接成功后清理过期断点快照，防 restore 回退旧状态）。</summary>
+    /// <summary>删除指定 key 的缓存文件 + 元数据 json + 索引条目（§6.3：续接成功后清理过期断点快照，防 restore 回退旧状态）。</summary>
     public bool DeleteCache(string key)
     {
         try
         {
             var path = CacheFilePath(key);
             if (File.Exists(path)) File.Delete(path);
+            var metaPath = Path.Combine(_cachePath, $"{Sanitize(key)}.meta.json");
+            if (File.Exists(metaPath)) File.Delete(metaPath);
             lock (_gate) _index.Remove(key);
             return true;
         }
@@ -136,6 +142,8 @@ public sealed class KvCacheManager
                 }
                 catch { /* 响应格式变化：忽略 */ }
                 RecordSave(key, slot, nSaved, nWritten);
+                // 快照落盘校验 + 元数据 json（RAMDisk 快照全权接管：快照是会话唯一可信数据源，必须校验）
+                VerifyAndWriteMetadata(key, nSaved);
             }
             else
             {
@@ -149,6 +157,80 @@ public sealed class KvCacheManager
                 _inflightSaves.Remove(key);
             }
         }
+    }
+
+    /// <summary>
+    /// 快照落盘校验（文件大小 > 0、saved_n > 0）+ 写元数据 json（{key}.meta.json：session_id/saved_n_tokens/save_timestamp/ctx_size）。
+    /// 校验不通过抛异常（调用方发 [EDGE-CASE-SAVE-FAILED] 并 DeleteCache 标记快照失效）。
+    /// </summary>
+    private void VerifyAndWriteMetadata(string key, int nSaved)
+    {
+        var path = CacheFilePath(key);
+        if (!File.Exists(path)) throw new InvalidOperationException("快照文件不存在");
+        long size = 0;
+        try { size = new FileInfo(path).Length; } catch { /* 忽略 */ }
+        if (size <= 0 || nSaved <= 0)
+            throw new InvalidOperationException($"快照校验失败：size={size}, saved_n={nSaved}");
+
+        // 元数据 json（slot-load 阶段校验 + metrics 观测用）
+        try
+        {
+            var meta = new System.Text.Json.Nodes.JsonObject
+            {
+                ["session_id"] = key,
+                ["saved_n_tokens"] = nSaved,
+                ["save_timestamp"] = (long)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                ["ctx_size"] = _ctxSize
+            };
+            File.WriteAllText(Path.Combine(_cachePath, $"{Sanitize(key)}.meta.json"), meta.ToJsonString());
+        }
+        catch
+        {
+            // 元数据写入失败不影响快照本身（restore 侧按"无元数据"降级处理）
+        }
+    }
+
+    /// <summary>
+    /// restore 前置校验：快照文件存在、大小合法、元数据 saved_n > 0。
+    /// 损坏/缺失 → [EDGE-CASE-SNAPSHOT-CORRUPT] + DeleteCache（废弃快照，调用方走全量 prefill 兜底）。
+    /// </summary>
+    private bool ValidateSnapshot(string key)
+    {
+        var path = CacheFilePath(key);
+        if (!File.Exists(path)) return false;
+        long size = 0;
+        try { size = new FileInfo(path).Length; } catch { /* 忽略 */ }
+        if (size <= 0)
+        {
+            OnCorrupt(key, $"快照文件大小为 0：{path}");
+            return false;
+        }
+        // 元数据校验（无元数据文件视为旧版快照，放行；有但 saved_n<=0 判定损坏）
+        var metaPath = Path.Combine(_cachePath, $"{Sanitize(key)}.meta.json");
+        if (File.Exists(metaPath))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(metaPath));
+                if (doc.RootElement.TryGetProperty("saved_n_tokens", out var sn) && sn.GetInt32() <= 0)
+                {
+                    OnCorrupt(key, $"元数据 saved_n_tokens={sn.GetInt32()}（异常值）");
+                    return false;
+                }
+            }
+            catch
+            {
+                OnCorrupt(key, "元数据 json 解析失败");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void OnCorrupt(string key, string reason)
+    {
+        _log?.Invoke($"[EDGE-CASE-SNAPSHOT-CORRUPT] {key}：{reason}，废弃快照走全量 prefill 兜底。");
+        DeleteCache(key);
     }
 
     /// <summary>
@@ -168,7 +250,8 @@ public sealed class KvCacheManager
             try { await saveTask; } catch { /* save 失败不影响 restore 尝试 */ }
         }
 
-        if (!HasCache(key)) return false;
+        // restore 前置校验：快照文件/元数据损坏 → [EDGE-CASE-SNAPSHOT-CORRUPT] + 废弃（全量 prefill 兜底）
+        if (!ValidateSnapshot(key)) return false;
 
         var body = new { filename = $"{Sanitize(key)}.bin" };
         var json = JsonSerializer.Serialize(body);

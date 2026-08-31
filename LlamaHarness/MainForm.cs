@@ -45,6 +45,8 @@ public class MainForm : Form
     private readonly CheckBox _chkTokenGuard = new() { Text = "Token Guard（防上下文超长）", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
     private readonly NumericUpDown _numReservedTokens = new() { Minimum = 512, Maximum = 131_072, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
     private readonly NumericUpDown _numPromptOverhead = new() { Minimum = 0, Maximum = 65_536, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
+    private readonly NumericUpDown _numCacheRam = new() { Minimum = 0, Maximum = 16_384, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
+    private readonly CheckBox _chkNoCacheIdleSlots = new() { Text = "禁空闲slot入缓存", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
     private readonly CheckBox _chkContinuation = new() { Text = "输出续接（截断自动续写）", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(200, 200, 200) };
     private readonly NumericUpDown _numMaxContinuations = new() { Minimum = 1, Maximum = 50, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
     private readonly NumericUpDown _numContTimeout = new() { Minimum = 30, Maximum = 3600, Dock = DockStyle.Fill, BackColor = Color.FromArgb(45, 45, 45), ForeColor = Color.White };
@@ -1420,7 +1422,7 @@ public class MainForm : Form
         // 文字框白字（禁用时也保持白字，清晰）+ CheckBox 勾改黑
         foreach (var c in new[] { _txtExe, _txtModel, _txtExtra, _txtPcoreMask, _txtKvCachePath, _txtLoadMode, _txtCacheTypeKv, _txtSpecType })
             if (c is TextBox tb) tb.ForeColor = Color.White;
-        foreach (var c in new[] { _chkNoKv, _chkAuto, _chkForceStream, _chkTokenGuard, _chkContinuation, _chkCrashRecover, _chkFlashAttn, _chkRequestDump, _chkAutoPreDshRule, _chkAutoPreWebui, _chkAutoPreTrae, _chkAutoPreDshAgent, _chkSnapDshRule, _chkSnapWebui, _chkSnapTrae, _chkSnapDshAgent })
+        foreach (var c in new[] { _chkNoKv, _chkAuto, _chkForceStream, _chkTokenGuard, _chkContinuation, _chkCrashRecover, _chkFlashAttn, _chkRequestDump, _chkAutoPreDshRule, _chkAutoPreWebui, _chkAutoPreTrae, _chkAutoPreDshAgent, _chkSnapDshRule, _chkSnapWebui, _chkSnapTrae, _chkSnapDshAgent, _chkNoCacheIdleSlots })
             ApplyBlackCheck(c);
 
         var panel = new TableLayoutPanel
@@ -1487,6 +1489,8 @@ public class MainForm : Form
         AddRow("Token Guard:", _chkTokenGuard, null);
         AddRow("输出预留:", _numReservedTokens, null);
         AddRow("Prompt头部开销:", _numPromptOverhead, null);
+        AddRow("Cache-RAM(MiB):", _numCacheRam, null);
+        AddRow("空闲slot缓存:", _chkNoCacheIdleSlots, null);
         AddRow("输出续接:", _chkContinuation, null);
         AddRow("最大续接:", _numMaxContinuations, null);
         AddRow("续接超时:", _numContTimeout, null);
@@ -1515,6 +1519,8 @@ public class MainForm : Form
         _tooltip.SetToolTip(_chkTokenGuard, "代理层预估算 + 裁剪，防上下文超长 400。预算 = ctx ÷ parallel − 输出预留。");
         _tooltip.SetToolTip(_numReservedTokens, "输出预留：为模型生成回复保留的 token 数（默认 8192）。预算 = ctx ÷ parallel − 输出预留 − Prompt头部开销预留。");
         _tooltip.SetToolTip(_numPromptOverhead, "Prompt 头部开销预留：tools 工具定义、system 提示词、Jinja 模板渲染带来的隐形 token，不计入对话消息统计（默认 10240）。工具数量增多时可调大。");
+        _tooltip.SetToolTip(_numCacheRam, "llama.cpp 主机内存 Prompt-Cache 上限（MiB，--cache-ram）。0 = 关闭内置 prompt-cache（RAMDisk 快照全权接管模式，消除 LRU 驱逐虚假 KV-MISS）；回滚旧双兜底模式设 8192。");
+        _tooltip.SetToolTip(_chkNoCacheIdleSlots, "禁止任务 release 后自动把空闲 slot 状态存入 prompt cache（--no-cache-idle-slots，与 Cache-RAM=0 配套）。");
         _tooltip.SetToolTip(_chkContinuation, "输出被 max_tokens 截断（finish_reason=length）时自动续写；工具调用/流式分片场景自动隔离不介入。");
         _tooltip.SetToolTip(_numMaxContinuations, "单次请求最多自动续接轮数（防死循环，默认 10）。");
         _tooltip.SetToolTip(_numContTimeout, "单轮推理超时秒数，超时返回已生成内容（默认 300）。");
@@ -1609,6 +1615,8 @@ public class MainForm : Form
         _chkTokenGuard.Checked = cfg.TokenGuardEnabled;
         _numReservedTokens.Value = Math.Clamp(cfg.ReservedOutputTokens, (int)_numReservedTokens.Minimum, (int)_numReservedTokens.Maximum);
         _numPromptOverhead.Value = Math.Clamp(cfg.ReservedPromptOverhead, (int)_numPromptOverhead.Minimum, (int)_numPromptOverhead.Maximum);
+        _numCacheRam.Value = Math.Clamp(cfg.CacheRamMiB, (int)_numCacheRam.Minimum, (int)_numCacheRam.Maximum);
+        _chkNoCacheIdleSlots.Checked = cfg.NoCacheIdleSlots;
         _chkContinuation.Checked = cfg.ContinuationEnabled;
         _numMaxContinuations.Value = Math.Clamp(cfg.MaxContinuations, (int)_numMaxContinuations.Minimum, (int)_numMaxContinuations.Maximum);
         _numContTimeout.Value = Math.Clamp(cfg.ContinuationTimeoutSeconds, (int)_numContTimeout.Minimum, (int)_numContTimeout.Maximum);
@@ -1663,6 +1671,8 @@ public class MainForm : Form
         _config.TokenGuardEnabled = _chkTokenGuard.Checked;
         _config.ReservedOutputTokens = (int)_numReservedTokens.Value;
         _config.ReservedPromptOverhead = (int)_numPromptOverhead.Value;
+        _config.CacheRamMiB = (int)_numCacheRam.Value;
+        _config.NoCacheIdleSlots = _chkNoCacheIdleSlots.Checked;
         _config.ContinuationEnabled = _chkContinuation.Checked;
         _config.MaxContinuations = (int)_numMaxContinuations.Value;
         _config.ContinuationTimeoutSeconds = (int)_numContTimeout.Value;
@@ -1756,6 +1766,8 @@ public class MainForm : Form
         _chkForceStream.CheckedChanged += OnParamEdited;
         _chkTokenGuard.CheckedChanged += OnParamEdited;
         _numReservedTokens.ValueChanged += OnParamEdited;
+        _numCacheRam.ValueChanged += OnParamEdited;
+        _chkNoCacheIdleSlots.CheckedChanged += OnParamEdited;
         _chkContinuation.CheckedChanged += OnParamEdited;
         _numMaxContinuations.ValueChanged += OnParamEdited;
         _numContTimeout.ValueChanged += OnParamEdited;
@@ -2246,7 +2258,7 @@ public class MainForm : Form
 
         // CheckBox 禁用时同步刷新为灰（启用时恢复黑）
         var checkColor = busy ? Color.FromArgb(0x88, 0x88, 0x88) : Color.Black;
-        foreach (var c in new[] { _chkNoKv, _chkAuto, _chkForceStream, _chkTokenGuard, _chkContinuation, _chkCrashRecover, _chkAutoPreDshRule, _chkAutoPreWebui, _chkAutoPreTrae, _chkAutoPreDshAgent, _chkSnapDshRule, _chkSnapWebui, _chkSnapTrae, _chkSnapDshAgent })
+        foreach (var c in new[] { _chkNoKv, _chkAuto, _chkForceStream, _chkTokenGuard, _chkContinuation, _chkCrashRecover, _chkAutoPreDshRule, _chkAutoPreWebui, _chkAutoPreTrae, _chkAutoPreDshAgent, _chkSnapDshRule, _chkSnapWebui, _chkSnapTrae, _chkSnapDshAgent, _chkNoCacheIdleSlots })
             if (c is CheckBox cb)
                 cb.ForeColor = checkColor;
     }

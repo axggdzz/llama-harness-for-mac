@@ -54,6 +54,10 @@ public class AppConfig
     public int ReservedOutputTokens { get; set; } = 8192;
     /// <summary>Prompt 头部开销预留（tools 工具定义 + system 提示词 + Jinja 模板渲染的隐形 token，不计入对话消息统计）。默认 10240 覆盖多工具 Agent 场景；工具数量增多时可在 UI 上调大。</summary>
     public int ReservedPromptOverhead { get; set; } = 10240;
+    /// <summary>llama.cpp 主机内存 Prompt-Cache 上限（MiB）：0 = 完全关闭内置 prompt-cache（RAMDisk 快照全权接管模式，消除 LRU 驱逐虚假 KV-MISS）；回滚旧双兜底模式设 8192。</summary>
+    public int CacheRamMiB { get; set; } = 0;
+    /// <summary>禁止任务 release 后自动把空闲 slot 状态存入 prompt cache（与 CacheRamMiB=0 配套；cache-ram&gt;0 时仍生效）。</summary>
+    public bool NoCacheIdleSlots { get; set; } = true;
     /// <summary>输出续接总开关：输出被 max_tokens 截断（finish_reason=length）时自动续接。</summary>
     public bool ContinuationEnabled { get; set; } = true;
     /// <summary>最大续接迭代次数（防死循环）。</summary>
@@ -143,6 +147,7 @@ public class AppConfig
             if (cfg.IdleMinutes <= 0) cfg.IdleMinutes = 15;
             if (cfg.ReservedOutputTokens <= 0) cfg.ReservedOutputTokens = 8192;
             if (cfg.ReservedPromptOverhead < 0) cfg.ReservedPromptOverhead = 10240;
+            if (cfg.CacheRamMiB < 0) cfg.CacheRamMiB = 0;
             if (cfg.MaxContinuations < 1) cfg.MaxContinuations = 10;
             if (cfg.ContinuationTimeoutSeconds < 30) cfg.ContinuationTimeoutSeconds = 300;
             if (cfg.MaxAutoRestarts < 0) cfg.MaxAutoRestarts = 2; // 0 = 禁用进程死亡分支的自动重启

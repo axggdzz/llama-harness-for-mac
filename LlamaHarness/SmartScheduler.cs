@@ -130,6 +130,10 @@ public sealed class SmartScheduler : IDisposable
     /// autoPre key 首次真实 prefill 完成后立即落盘快照（1.1 修复），防进程崩溃未休眠时磁盘快照停留在旧状态。
     /// 每周期只存一次；后续增量 KV 仍由休眠前 save 兜底最终态。</summary>
     private readonly HashSet<string> _savedKeysThisRun = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>快照新鲜度标记（唤醒时清空）：key 的 RAMDisk 快照已覆盖到最近一轮任务完成时刻。
+    /// 条件式 save（RAMDisk 快照全权接管）：每轮任务完成后，非新鲜的 autoSnapshot key 触发后台异步 save（不阻塞响应）；
+    /// save 成功/restore 命中/同步存档 → 标记新鲜；save 失败 → DeleteCache 废弃 + [EDGE-CASE-SAVE-FAILED]。</summary>
+    private readonly HashSet<string> _freshSnapshotKeys = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>休眠静默观察期进行中标志（_sleepGate 保护）：防闲置定时器重复触发休眠流程。</summary>
     private bool _sleepPreparing;
 
@@ -506,16 +510,17 @@ public sealed class SmartScheduler : IDisposable
             Log?.Invoke($"槽位亲和已启用：{_cfg.Parallel} 槽，指纹绑定 + n_slots 路由（绑定表 slot_bindings.json，LRU 驱逐）。");
 
             // KV Cache 持久化：KvCachePath 非空时启用（驱逐 save / 重绑定 restore / 休眠前 save / 唤醒后 restore）
+            // ctxSize + log 回调：快照元数据 json（ctx_size 字段）+ [EDGE-CASE-SNAPSHOT-CORRUPT] 埋点
             _kvCache = !string.IsNullOrWhiteSpace(_cfg.KvCachePath)
-                ? new KvCacheManager(_hc, _cfg.KvCachePath, _cfg.Parallel, srvPort)
+                ? new KvCacheManager(_hc, _cfg.KvCachePath, _cfg.Parallel, srvPort, _cfg.CtxSize, s => Log?.Invoke(s))
                 : null;
             // 3.1 Restore 命中率可观测：与 KV Cache 同生命周期（累计统计跨唤醒周期持久化于 config/restore_stats.json）
             _restoreStats = _kvCache != null ? new RestoreStats() : null;
             if (_kvCache != null)
                 Log?.Invoke($"KV Cache 持久化已启用：路径 {_cfg.KvCachePath}（驱逐自动 save，重绑定自动 restore，休眠前自动 save，唤醒后自动 restore）。");
 
-            // 新进程槽位 KV 全空：清空「本轮已服务」+「首请求存档」标记 → 唤醒后各 key 首次请求触发 restore 自愈（跳过全量 prefill），autoPre key 重新触发首请求存档
-            lock (_kvStateGate) { _servedKeysThisRun.Clear(); _savedKeysThisRun.Clear(); }
+            // 新进程槽位 KV 全空：清空「本轮已服务」+「首请求存档」+「快照新鲜度」标记 → 唤醒后各 key 首次请求触发 restore 自愈（跳过全量 prefill），autoPre key 重新触发首请求存档
+            lock (_kvStateGate) { _servedKeysThisRun.Clear(); _savedKeysThisRun.Clear(); _freshSnapshotKeys.Clear(); }
 
             await WaitReadyAsync(srvPort);
 
@@ -781,7 +786,12 @@ public sealed class SmartScheduler : IDisposable
                 return null;
             }
             if (note != null) Log?.Invoke(note);
-            if (didKvRestore) Log?.Invoke("[TOKEN-GUARD] KV restore 后重跑校验通过（saved_n 残留 + 新 prompt 未超预算）");
+            if (didKvRestore)
+            {
+                Log?.Invoke("[TOKEN-GUARD] KV restore 后重跑校验通过（saved_n 残留 + 新 prompt 未超预算）");
+                // restore 命中 = 快照已加载到槽位：标记新鲜，避免本轮完成后立即冗余重存
+                if (routedKey != null) lock (_kvStateGate) _freshSnapshotKeys.Add(routedKey);
+            }
         }
 
         // 非流式请求检测 + 可选强制流式改写：
@@ -988,6 +998,7 @@ public sealed class SmartScheduler : IDisposable
                 try { errBody = await resp.Content.ReadAsStringAsync(); } catch { /* 读取失败按非超限处理 */ }
                 if (errBody.Contains("exceeds the available context size", StringComparison.OrdinalIgnoreCase))
                 {
+                    Log?.Invoke("[EDGE-CASE-CONTEXT-OVERFLOW-400] llama.cpp 上下文超限 400，触发自愈（aggressive trim + KV 废弃 + 重发）");
                     Log?.Invoke("[TOKEN-GUARD-FATAL] real prompt overflow，aggressive trim + KV 废弃 + 重发");
                     // 1. 激进裁剪：预算收紧 50%（比正常预算更严格）
                     int tightBudget = Math.Max(AppConfig.MinInputBudgetTokens, _cfg.GetInputBudget() / 2);
@@ -1101,13 +1112,39 @@ public sealed class SmartScheduler : IDisposable
                         try
                         {
                             await _kvCache.SaveAsync(saveSlot, routedKey);
-                            lock (_kvStateGate) _savedKeysThisRun.Add(routedKey);
+                            lock (_kvStateGate) { _savedKeysThisRun.Add(routedKey); _freshSnapshotKeys.Add(routedKey); }
                             Log?.Invoke($"[KV-SAVE] 首请求存档：{routedKey} → slot{saveSlot}（{swSave.Elapsed.TotalSeconds:F1}s）");
                         }
                         catch (Exception ex)
                         {
-                            Log?.Invoke($"[KV-SAVE] 首请求存档失败：{routedKey} → slot{saveSlot}（{ex.Message}），下次请求重试。");
+                            Log?.Invoke($"[EDGE-CASE-SAVE-FAILED] {routedKey}：首请求存档失败（{ex.Message}），废弃旧快照，下次请求重试。");
+                            _kvCache.DeleteCache(routedKey);
                         }
+                    }
+
+                    // 1.2 每轮条件式后台 save（RAMDisk 快照全权接管）：快照非新鲜（上一轮后 KV 有增量）→ 异步后台 save，
+                    // 不阻塞响应返回（零额外延迟）；成功 → 标记新鲜；失败 → [EDGE-CASE-SAVE-FAILED] + 废弃快照（下轮自动重试）。
+                    // 并发安全：KvCacheManager._inflightSaves 按 key 去重，与驱逐前/休眠前同步 save 共享在途任务。
+                    bool fresh;
+                    lock (_kvStateGate) fresh = _freshSnapshotKeys.Contains(routedKey);
+                    if (!fresh)
+                    {
+                        var bgKey = routedKey;
+                        var bgSlot = saveSlot;
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await _kvCache.SaveAsync(bgSlot, bgKey);
+                                lock (_kvStateGate) _freshSnapshotKeys.Add(bgKey);
+                                Log?.Invoke($"[KV-SAVE] 每轮后台快照：{bgKey} → slot{bgSlot}");
+                            }
+                            catch (Exception ex)
+                            {
+                                Log?.Invoke($"[EDGE-CASE-SAVE-FAILED] {bgKey}：每轮后台快照失败（{ex.Message}），废弃旧快照。");
+                                _kvCache.DeleteCache(bgKey);
+                            }
+                        });
                     }
                 }
             }
