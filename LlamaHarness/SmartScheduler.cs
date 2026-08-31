@@ -1350,8 +1350,10 @@ public sealed class SmartScheduler : IDisposable
 
     /// <summary>§8 可观测：前缀哈希 HIT/MISS 判定。一致 → 原生 KV 前缀复用（增量 prefill）；不一致 → 全量重算。
     /// 返回 wrapper 指纹判定结果（true=HIT / false=MISS / null=无指纹数据），供 3.1 RestoreStats FIFO 归属。
-    /// KV-MISS 不输出日志（agent 每轮 messages 必变 → 前缀指纹必不同 → 每轮 MISS 是设计预期，纯噪音）；
-    /// 实际 KV 命中由 [KV-RESTORE-JUDGE] 的 prompt_eval tokens 真值判定（HitByDelta = 增量 prefill）。</summary>
+    /// KV-MISS 条件式日志：
+    /// - HitByDelta（上一轮 restore 命中 + 增量 prefill）→ [KV-MISS-DEBUG]（降级，agent 每轮 messages 必变是设计预期）；
+    /// - FullPrefill/MidRange（真实全量重算）或无判定数据 → [KV-MISS]（保留 INFO，用于快照损坏等故障排查）。
+    /// Metrics 埋点不受影响：RestoreStats.OnPromptEval 持续统计 false_miss。</summary>
     private bool? LogPrefixHash(string key, JsonObject? root)
     {
         var hash = root != null ? PrefixHash(root) : null;
@@ -1363,6 +1365,15 @@ public sealed class SmartScheduler : IDisposable
                 bool hit = prev == hash;
                 if (hit)
                     Log?.Invoke($"[KV-HIT] {key}：前缀未变 → 原生 KV 复用（增量 prefill）");
+                else
+                {
+                    // MISS 分支：区分 HitByDelta 虚假 MISS vs 真实 MISS
+                    var lj = _restoreStats?.LastJudgeResult;
+                    if (lj != null && lj.Key.Equals(key, StringComparison.OrdinalIgnoreCase) && lj.Reason == "HitByDelta")
+                        Log?.Invoke($"[KV-MISS-DEBUG] {key}：消息指纹变更，HitByDelta 增量复用，增量 prefill={lj.PromptEvalTokens} tokens");
+                    else
+                        Log?.Invoke($"[KV-MISS] {key}：前缀变更 → 全量重算");
+                }
                 _prefixHashes[key] = hash;
                 return hit;
             }

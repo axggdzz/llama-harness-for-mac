@@ -30,6 +30,10 @@ public sealed class RestoreStats
     private bool _dirty;
     private LastJudge? _lastJudge;
 
+    /// <summary>最近一次判定结果（供 SmartScheduler 在请求侧同步读取，区分 HitByDelta 虚假 MISS vs 真实 MISS）。
+    /// 线程安全：volatile 引用赋值原子；record 不可变。</summary>
+    public volatile JudgeResult? LastJudgeResult;
+
     /// <summary>FIFO 条目 TTL：超时视为错位丢弃（如非判定上下文任务的 print_timing、预热 dummy 请求）。</summary>
     public TimeSpan PendingTtl { get; set; } = TimeSpan.FromSeconds(60);
 
@@ -138,6 +142,7 @@ public sealed class RestoreStats
             var level = _totalAttempts >= MinSamplesForAlert ? ComputeAlertLevel(rate) : AlertLevel.None;
             alertRaised = level != _lastAlert ? level : AlertLevel.None; // 状态迁移触发：同级别不重复告警
             _lastAlert = level;
+            LastJudgeResult = new JudgeResult(p.Key, p.Slot, hit, reason, tokens, p.SavedN, p.WrapperHit, falseMiss, falseHit, rate, alertRaised);
         }
 
         TryAutoSave(); // 节流持久化（≥10s 一次）
