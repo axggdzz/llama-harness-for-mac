@@ -910,7 +910,7 @@ public class MainForm : Form
         };
         var lblTitle = new Label
         {
-            Text = "Llama.cpp Harness--长Agent本地私有化资源治理框架\n资源治理抬高效率下限，硬件决定性能上限!\n低并发、高可靠、长Agent 本地私有化领域专属优化解决方案",
+            Text = "Llama.cpp Harness--长Agent本地私有化资源治理框架\n资源治理抬高效率下限，硬件决定性能上限!\n专为低并发、高可靠、复杂Agent任务深度优化",
             Font = new Font("Microsoft YaHei UI", 24F, FontStyle.Bold),
             ForeColor = C_Primary,
             AutoSize = true,
