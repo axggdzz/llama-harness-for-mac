@@ -101,7 +101,7 @@ public static class TokenGuard
 
         var turnStarts = new List<int>();
         for (int i = firstUser; i <= lastUser; i++)
-            if (RoleOf(messages[i]) == "user") turnStarts.Add(i);
+            if (RoleOf(messages[i]!) == "user") turnStarts.Add(i);
 
         // ── 轮次制裁剪（E-2 二分收敛）──
         // 旧实现每删一轮全量重 tokenize（最坏 K+1 次 HTTP 往返，串行阻塞关键路径）。
@@ -161,14 +161,14 @@ public static class TokenGuard
         for (int iter = 0; iter < 5 && count > budget; iter++)
         {
             int maxIdx = IndexOfLargestContent(messages);
-            string? content = maxIdx >= 0 ? GetContent(messages[maxIdx]) : null;
+            string? content = maxIdx >= 0 ? GetContent(messages[maxIdx]!) : null;
             if (content == null || content.Length < 200) break; // 无可再裁的内容
             int newLen = Math.Max(50, (int)(content.Length * retain));
             // O-14：头尾双保留（头部留上下文、尾部留最新信息），替代纯头部截断
             int half = newLen / 2;
             int tail = newLen - half;
             string kept = content[..half] + "\n[…]\n" + content[^tail..];
-            SetContent(messages[maxIdx], kept + "\n[已截断 - Token Guard]");
+            SetContent(messages[maxIdx]!, kept + "\n[已截断 - Token Guard]");
             contentTruncated = true;
             count = await counter(BuildMessagesText(messages)) ?? -1;
             if (count < 0) return (true, deletedTurns > 0 || contentTruncated, null);
@@ -239,14 +239,14 @@ public static class TokenGuard
     private static int FirstIndexOfRole(JsonArray arr, string role)
     {
         for (int i = 0; i < arr.Count; i++)
-            if (RoleOf(arr[i]) == role) return i;
+            if (RoleOf(arr[i]!) == role) return i;
         return -1;
     }
 
     private static int LastIndexOfRole(JsonArray arr, string role)
     {
         for (int i = arr.Count - 1; i >= 0; i--)
-            if (RoleOf(arr[i]) == role) return i;
+            if (RoleOf(arr[i]!) == role) return i;
         return -1;
     }
 
@@ -273,7 +273,7 @@ public static class TokenGuard
         int best = -1, bestLen = 0;
         for (int i = 0; i < arr.Count; i++)
         {
-            var c = GetContent(arr[i]);
+            var c = GetContent(arr[i]!);
             if (c != null && c.Length > bestLen) { bestLen = c.Length; best = i; }
         }
         return best;

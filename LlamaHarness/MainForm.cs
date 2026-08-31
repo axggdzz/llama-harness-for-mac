@@ -76,14 +76,14 @@ public class MainForm : Form
     private readonly ToolTip _tooltip = new();
 
     // —— 操作按钮（Control Panel 区）——
-    private Button _btnStart;
-    private Button _btnStop;
-    private Button _btnClearLog;
-    private Button _btnClearCache;
-    private Button _btnThinkOn;   // 开启思考模式 → XHigh（深度推理）
-    private Button _btnTurbo;     // 开启极速模式 → Off（不注入思考参数）
-    private Button _btnExportCfg;
-    private Button _btnImportCfg;
+    private Button _btnStart = null!;
+    private Button _btnStop = null!;
+    private Button _btnClearLog = null!;
+    private Button _btnClearCache = null!;
+    private Button _btnThinkOn = null!;   // 开启思考模式 → XHigh（深度推理）
+    private Button _btnTurbo = null!;     // 开启极速模式 → Off（不注入思考参数）
+    private Button _btnExportCfg = null!;
+    private Button _btnImportCfg = null!;
 
     // —— 思考模式状态标签（侧边统计面板）——
     private readonly Label _lblThinking = new()
@@ -94,25 +94,25 @@ public class MainForm : Form
 
     // —— 系统资源统计（手动触发，无轮询）——
     private readonly SystemMetrics _metrics = new();
-    private Button _btnRefreshRes;
-    private Label _lblResTimestamp;
-    private Panel _sysCard;         // 系统资源卡片容器
-    private Label _lblSysRes;       // 系统资源卡片内容
-    private Panel _slotsCard;       // /slots 卡片容器
-    private Label _lblSlotsTitle;   // /slots 标题（含状态 ✓/✗）
-    private Label _lblSlotsBody;    // /slots 数据区
-    private Button _btnRawSlots;    // [查看原始报文 ▸]
-    private TextBox _rawSlotsBox;   // Raw 内容（TextBox 支持滚动）
-    private Panel _propsCard;       // /props 卡片容器
-    private Label _lblPropsTitle;   // /props 标题（含状态 ✓/✗）
-    private TableLayoutPanel _tblPropsBody; // /props 数据区（两列表格：左标签+右值）
-    private Button _btnRawProps;    // [查看原始报文 ▸]
-    private TextBox _rawPropsBox;   // Raw 内容（TextBox 支持滚动）
-    private Panel _metricsCard;     // /metrics 卡片容器
-    private Label _lblMetricsTitle; // /metrics 标题（含状态 ✓/✗）
-    private Label _lblMetricsBody;  // /metrics 数据区
-    private Button _btnRawMetrics;  // [查看原始报文 ▸]
-    private TextBox _rawMetricsBox; // Raw 内容（TextBox 支持滚动）
+    private Button _btnRefreshRes = null!;
+    private Label _lblResTimestamp = null!;
+    private Panel _sysCard = null!;         // 系统资源卡片容器
+    private Label _lblSysRes = null!;       // 系统资源卡片内容
+    private Panel _slotsCard = null!;       // /slots 卡片容器
+    private Label _lblSlotsTitle = null!;   // /slots 标题（含状态 ✓/✗）
+    private Label _lblSlotsBody = null!;    // /slots 数据区
+    private Button _btnRawSlots = null!;    // [查看原始报文 ▸]
+    private TextBox _rawSlotsBox = null!;   // Raw 内容（TextBox 支持滚动）
+    private Panel _propsCard = null!;       // /props 卡片容器
+    private Label _lblPropsTitle = null!;   // /props 标题（含状态 ✓/✗）
+    private TableLayoutPanel _tblPropsBody = null!; // /props 数据区（两列表格：左标签+右值）
+    private Button _btnRawProps = null!;    // [查看原始报文 ▸]
+    private TextBox _rawPropsBox = null!;   // Raw 内容（TextBox 支持滚动）
+    private Panel _metricsCard = null!;     // /metrics 卡片容器
+    private Label _lblMetricsTitle = null!; // /metrics 标题（含状态 ✓/✗）
+    private Label _lblMetricsBody = null!;  // /metrics 数据区
+    private Button _btnRawMetrics = null!;  // [查看原始报文 ▸]
+    private TextBox _rawMetricsBox = null!; // Raw 内容（TextBox 支持滚动）
     private LlamaCppMonitorCollector? _monitorCollector; // llama.cpp 采集器（懒初始化，端口确定后创建）
     private int _metricsBusy;
     private bool _crashAlertShown; // 崩溃熔断红色告警状态（防重复告警；窗口滑出后自动恢复）
@@ -168,42 +168,42 @@ public class MainForm : Form
     };
 
     // —— 槽位绑定表格（页签3）——
-    private DataGridView _gridSlots;
+    private DataGridView _gridSlots = null!;
     // —— 槽位管理页/表格（页签4，强占/KV缓存可编辑）——
-    private Panel _tabSlotMgmt;
-    private DataGridView _gridSlotMgmt;
+    private Panel _tabSlotMgmt = null!;
+    private DataGridView _gridSlotMgmt = null!;
     // —— 配置管理页（页签6）——
-    private Panel _tabConfig;
-    private Panel _docPanel; // 文档展示面板（右侧，点击使用说明/常见问题/更新内容后显示）
+    private Panel _tabConfig = null!;
+    private Panel _docPanel = null!; // 文档展示面板（右侧，点击使用说明/常见问题/更新内容后显示）
 
     // —— 自定义页签区（替代原生 TabControl：扁平按钮页签条 + Panel 显隐切换，对齐参考界面）——
-    private SplitContainer _contentSplit;   // 左 80% 页签区 | 右 20% 状态面板（SizeChanged 时按 8:2 重算）
+    private SplitContainer _contentSplit = null!;   // 左 80% 页签区 | 右 20% 状态面板（SizeChanged 时按 8:2 重算）
     private Button[] _tabButtons = null!;
     private Control[] _tabPages = null!; // 页签页（_txtLog 是 RichTextBox，其余为 Panel，统一用 Control）
     private int _currentTab = 0;
 
     // —— 右侧状态面板（原底部 SideStatsPanel 移入）——
-    private Label _lblStatus;       // 服务阶段卡片：调度器状态文本（运行中 · N个在途任务…），替代原侧边栏实例
-    private Label _lblModuleState;  // 模块状态（网关 运行中绿 / 已停止红）
-    private Label _lblResSummary;   // 系统资源单行摘要（CPU/内存/显存）
-    private Label _lblRunTime;      // 运行时长（自本次唤醒起）
+    private Label _lblStatus = null!;       // 服务阶段卡片：调度器状态文本（运行中 · N个在途任务…），替代原侧边栏实例
+    private Label _lblModuleState = null!;  // 模块状态（网关 运行中绿 / 已停止红）
+    private Label _lblResSummary = null!;   // 系统资源单行摘要（CPU/内存/显存）
+    private Label _lblRunTime = null!;      // 运行时长（自本次唤醒起）
     private DateTime? _wakeTime;    // 本次唤醒时刻（非 Running 为 null）
 
     // —— 图标缓存（static/icon/*.png，缺失时降级纯文本按钮）——
     private static readonly Dictionary<string, Image> IconCache = new(StringComparer.OrdinalIgnoreCase);
     // —— 参数控件清单（BuildUi 一次构建；ApplyPhase 按相位批量启停，审计：原实现每次调用重建数组）——
-    private Control[] _paramControls;
+    private Control[] _paramControls = null!;
     // —— 槽位管理表 key→行索引（审计：原实现每轮刷新线性扫 Tag，O(n²)）——
     private readonly Dictionary<string, int> _slotMgmtRowIdx = new(StringComparer.Ordinal);
     // —— stats 表 id→行索引（E-10：对齐 _slotMgmtRowIdx 模式，替代 FindStatRow 线性扫 Tag）——
     private readonly Dictionary<long, DataGridViewRow> _statsRowIdx = new();
     // —— 槽位日志（槽位绑定页下方，独立持久化 slot.log）——
-    private RichTextBox _txtSlotLog;
+    private RichTextBox _txtSlotLog = null!;
 
     // —— 侧边统计标签 ——
-    private Label _lblTokenSummary;
-    private Label _lblSlotSummary;
-    private Label _lblRestoreHit;   // Restore 命中率卡片（3.1 可观测）
+    private Label _lblTokenSummary = null!;
+    private Label _lblSlotSummary = null!;
+    private Label _lblRestoreHit = null!;   // Restore 命中率卡片（3.1 可观测）
 
     public MainForm()
     {
@@ -910,7 +910,7 @@ public class MainForm : Form
         };
         var lblTitle = new Label
         {
-            Text = "Llama.cpp Harness-面向工程Llama.cpp智能助手\n本地部署大模型，资源治理大于模型能力!",
+            Text = "Llama.cpp Harness--长Agent本地私有化资源治理框架\n资源治理抬高效率下限，硬件决定性能上限!\n低并发、高可靠、长Agent 本地私有化领域专属优化解决方案",
             Font = new Font("Microsoft YaHei UI", 24F, FontStyle.Bold),
             ForeColor = C_Primary,
             AutoSize = true,
