@@ -156,7 +156,8 @@ public sealed class LogStreamWriter : IDisposable
         if (_writer != null) return;
         var dir = Path.GetDirectoryName(_path);
         if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
-        _writer = new StreamWriter(new FileStream(_path, FileMode.Append, FileAccess.Write, FileShare.Read), Encoding.UTF8, 4096);
+        // FileShare.ReadWrite：允许测试/外部工具在写入期间读取文件（生产环境无影响）
+        _writer = new StreamWriter(new FileStream(_path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite), Encoding.UTF8, 4096);
         if (!_initialized)
         {
             // 首次打开：以既有文件大小为轮切基准（追加模式不重置计数）
