@@ -55,6 +55,7 @@ public static class LogFile
     public static Level Classify(string line)
     {
         if (UnusedTensorRe.IsMatch(line)) return Level.Info; // 3.3：良性警告降级，防误告警
+        if (line.StartsWith("[TOKEN-GUARD] ")) return Level.Info; // 可观测计量数据（msg_est=FAILED(tokenize) 是正常降级路径），非错误
         if (line.Contains("错误") || line.Contains("失败") || line.Contains("异常")) return Level.Error;
         if (line.Contains("警告")) return Level.Warn;
         var m = SeverityRe.Match(line);
