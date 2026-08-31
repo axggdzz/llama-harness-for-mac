@@ -1349,7 +1349,9 @@ public sealed class SmartScheduler : IDisposable
     }
 
     /// <summary>§8 可观测：前缀哈希 HIT/MISS 判定。一致 → 原生 KV 前缀复用（增量 prefill）；不一致 → 全量重算。
-    /// 返回 wrapper 指纹判定结果（true=HIT / false=MISS / null=无指纹数据），供 3.1 RestoreStats FIFO 归属。</summary>
+    /// 返回 wrapper 指纹判定结果（true=HIT / false=MISS / null=无指纹数据），供 3.1 RestoreStats FIFO 归属。
+    /// KV-MISS 不输出日志（agent 每轮 messages 必变 → 前缀指纹必不同 → 每轮 MISS 是设计预期，纯噪音）；
+    /// 实际 KV 命中由 [KV-RESTORE-JUDGE] 的 prompt_eval tokens 真值判定（HitByDelta = 增量 prefill）。</summary>
     private bool? LogPrefixHash(string key, JsonObject? root)
     {
         var hash = root != null ? PrefixHash(root) : null;
@@ -1359,9 +1361,8 @@ public sealed class SmartScheduler : IDisposable
             if (_prefixHashes.TryGetValue(key, out var prev))
             {
                 bool hit = prev == hash;
-                Log?.Invoke(hit
-                    ? $"[KV-HIT] {key}：前缀未变 → 原生 KV 复用（增量 prefill）"
-                    : $"[KV-MISS] {key}：前缀变更 → 全量重算");
+                if (hit)
+                    Log?.Invoke($"[KV-HIT] {key}：前缀未变 → 原生 KV 复用（增量 prefill）");
                 _prefixHashes[key] = hash;
                 return hit;
             }
