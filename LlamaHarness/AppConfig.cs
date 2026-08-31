@@ -50,8 +50,10 @@ public class AppConfig
     public string KvCachePath { get; set; } = "g:/temp";
     /// <summary>Token Guard 总开关：代理层预估算 + 裁剪，防上下文超长 400 错误。</summary>
     public bool TokenGuardEnabled { get; set; } = true;
-    /// <summary>输出预留 token（为模型生成回复保留）：预算 = CtxSize ÷ Parallel − 此值。</summary>
+    /// <summary>输出预留 token（为模型生成回复保留）：预算 = CtxSize ÷ Parallel − 此值 − Prompt头部开销预留。</summary>
     public int ReservedOutputTokens { get; set; } = 8192;
+    /// <summary>Prompt 头部开销预留（tools 工具定义 + system 提示词 + Jinja 模板渲染的隐形 token，不计入对话消息统计）。默认 10240 覆盖多工具 Agent 场景；工具数量增多时可在 UI 上调大。</summary>
+    public int ReservedPromptOverhead { get; set; } = 10240;
     /// <summary>输出续接总开关：输出被 max_tokens 截断（finish_reason=length）时自动续接。</summary>
     public bool ContinuationEnabled { get; set; } = true;
     /// <summary>最大续接迭代次数（防死循环）。</summary>
@@ -140,6 +142,7 @@ public class AppConfig
             if (cfg.BatchThreads < 0) cfg.BatchThreads = 0;   // 0 = 不拼 --tb
             if (cfg.IdleMinutes <= 0) cfg.IdleMinutes = 15;
             if (cfg.ReservedOutputTokens <= 0) cfg.ReservedOutputTokens = 8192;
+            if (cfg.ReservedPromptOverhead < 0) cfg.ReservedPromptOverhead = 10240;
             if (cfg.MaxContinuations < 1) cfg.MaxContinuations = 10;
             if (cfg.ContinuationTimeoutSeconds < 30) cfg.ContinuationTimeoutSeconds = 300;
             if (cfg.MaxAutoRestarts < 0) cfg.MaxAutoRestarts = 2; // 0 = 禁用进程死亡分支的自动重启
@@ -153,8 +156,8 @@ public class AppConfig
         }
     }
 
-    /// <summary>单槽输入 token 预算：上下文均摊到每槽，扣除预留输出预算（审计 O-9：收敛此前散落 5 处的重复公式）。</summary>
-    public int GetInputBudget() => Math.Max(MinInputBudgetTokens, CtxSize / Math.Max(1, Parallel) - ReservedOutputTokens);
+    /// <summary>单槽输入 token 预算：上下文均摊到每槽，扣除输出预留 + Prompt 头部开销预留（tools/system/Jinja 模板隐形 token）。审计 O-9：收敛此前散落 5 处的重复公式。</summary>
+    public int GetInputBudget() => Math.Max(MinInputBudgetTokens, CtxSize / Math.Max(1, Parallel) - ReservedOutputTokens - ReservedPromptOverhead);
 
     /// <summary>输入预算下限（防止极端配置下预算 ≤0 导致全部请求被裁剪）。</summary>
     public const int MinInputBudgetTokens = 1024;

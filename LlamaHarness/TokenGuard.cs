@@ -44,6 +44,34 @@ public static class TokenGuard
     }
 
     /// <summary>
+    /// 计量入口（每次调用强制输出 [TOKEN-GUARD] 日志，消除排查盲区）：
+    /// 先 tokenize 消息文本得到 msg_est，输出计量日志，再委托 GuardAsync 执行裁剪。
+    /// 返回 (Ok, Modified, Note)。
+    /// </summary>
+    public static async Task<(bool Ok, bool Modified, string? Note)> MeasureAsync(
+        JsonObject root, HttpClient hc, int backendPort, int budget,
+        int reservedOutput, int reservedOverhead,
+        Func<string, Task<int?>>? countTokens = null)
+    {
+        var messages = root["messages"] as JsonArray;
+        if (messages == null || messages.Count == 0) return (true, false, null);
+
+        Func<string, Task<int?>> counter = countTokens ?? ((string t) => CountTokensAsync(hc, backendPort, t));
+        int msgEst = await counter(BuildMessagesText(messages)) ?? -1;
+
+        // 强制计量日志（不管是否裁剪都输出，供 Streamlit+DuckDB 统计）
+        string logLine = msgEst >= 0
+            ? $"[TOKEN-GUARD] budget={budget}, msg_est={msgEst}, reserved_out={reservedOutput}, reserved_overhead={reservedOverhead}"
+            : $"[TOKEN-GUARD] budget={budget}, msg_est=FAILED(tokenize), reserved_out={reservedOutput}, reserved_overhead={reservedOverhead}";
+        Console.WriteLine(logLine);
+
+        var (ok, modified, note) = await GuardAsync(root, hc, backendPort, budget, counter);
+        // 合并计量信息到 note（调用方统一输出）
+        if (note != null) return (ok, modified, $"{logLine}\n{note}");
+        return (ok, modified, logLine);
+    }
+
+    /// <summary>
     /// 核心实现（DOM 版，E-1）：原地裁剪 root["messages"]，无中间 parse/serialize。
     /// 热路径（PrepareGatewayAsync）复用同一棵 DOM，管道末端统一序列化一次。
     /// 返回 (Ok, Modified, Note)：Modified=false → 调用方可直接用原 body；true → 需序列化 root。
