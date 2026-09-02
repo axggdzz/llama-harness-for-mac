@@ -1,0 +1,9 @@
+[package]
+name = "llama-harness-mac"
+version = "0.1.0"
+edition = "2021"
+description = "Rust/macOS port of LlamaHarness"
+license = "MIT"
+
+[dependencies]
+
