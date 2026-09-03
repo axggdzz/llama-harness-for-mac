@@ -101,14 +101,17 @@ impl Gateway {
             .ok()
             .map(Arc::new);
         let backend_base = format!("http://{}:{}", config.backend_host, config.backend_port);
-        let kv = Arc::new(KvCacheManager::new(
-            Client::new(),
-            backend_base,
-            config.data_dir.join("kv"),
-            config.data_dir.join("kv_cache_index.json"),
-            config.slot_count,
-            config.context_size.map(|value| value as u64),
-        ));
+        let kv = Arc::new(
+            KvCacheManager::new(
+                Client::new(),
+                backend_base,
+                config.data_dir.join("kv"),
+                config.data_dir.join("kv_cache_index.json"),
+                config.slot_count,
+                config.context_size.map(|value| value as u64),
+            )
+            .with_backend_save_path(config.backend_slot_save_path()),
+        );
         Self {
             inner: Arc::new(GatewayInner {
                 config,

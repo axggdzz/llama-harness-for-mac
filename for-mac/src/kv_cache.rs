@@ -56,6 +56,7 @@ pub struct KvCacheManager {
     client: Client,
     backend_base_url: String,
     cache_dir: PathBuf,
+    backend_save_path: Option<PathBuf>,
     index_path: PathBuf,
     slot_count: usize,
     context_size: Option<u64>,
@@ -75,6 +76,7 @@ impl KvCacheManager {
             client,
             backend_base_url: backend_base_url.into().trim_end_matches('/').to_owned(),
             cache_dir: cache_dir.into(),
+            backend_save_path: None,
             index_path: index_path.into(),
             slot_count: slot_count.max(1),
             context_size,
@@ -85,6 +87,11 @@ impl KvCacheManager {
         };
         manager.load_index();
         manager
+    }
+
+    pub fn with_backend_save_path(mut self, path: Option<PathBuf>) -> Self {
+        self.backend_save_path = path;
+        self
     }
 
     pub fn cache_file_path(&self, key: &str) -> PathBuf {
@@ -158,7 +165,8 @@ impl KvCacheManager {
 
     async fn save_once(&self, slot: usize, key: &str) -> Result<KvOperationResult> {
         tokio::fs::create_dir_all(&self.cache_dir).await?;
-        let filename = self.cache_file_path(key).to_string_lossy().to_string();
+        let local_path = self.cache_file_path(key);
+        let filename = backend_filename(&local_path, self.backend_save_path.is_some());
         let response = self
             .client
             .post(format!(
@@ -176,13 +184,19 @@ impl KvCacheManager {
         if !status.is_success() {
             return Err(anyhow!("KV save failed with HTTP {status}"));
         }
-        let saved_tokens = body.get("n_saved").and_then(|v| v.as_u64()).unwrap_or(0);
+        let saved_tokens = saved_token_count(&body);
         if !self.cache_file_path(key).is_file() {
             if let Some(data) = body.get("mock_data").and_then(|v| v.as_str()) {
                 tokio::fs::write(self.cache_file_path(key), data.as_bytes()).await?;
             }
         }
-        let bytes = tokio::fs::read(self.cache_file_path(key)).await?;
+        if let Some(backend_dir) = &self.backend_save_path {
+            let backend_path = backend_dir.join(&filename);
+            if backend_path.is_file() && backend_path != local_path {
+                tokio::fs::copy(&backend_path, &local_path).await?;
+            }
+        }
+        let bytes = tokio::fs::read(&local_path).await?;
         if bytes.is_empty() || saved_tokens == 0 {
             let _ = self.delete_snapshot(key);
             return Err(anyhow!("KV save validation failed"));
@@ -281,7 +295,12 @@ impl KvCacheManager {
                 "{}/slots/{slot}?action=restore",
                 self.backend_base_url
             ))
-            .json(&serde_json::json!({"filename": self.cache_file_path(key)}))
+            .json(&serde_json::json!({
+                "filename": backend_filename(
+                    &self.cache_file_path(key),
+                    self.backend_save_path.is_some()
+                )
+            }))
             .send()
             .await?;
         let status = response.status();
@@ -439,6 +458,25 @@ fn sanitize(key: &str) -> String {
     }
 }
 
+fn backend_filename(path: &std::path::Path, server_save_path_enabled: bool) -> String {
+    if server_save_path_enabled {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("snapshot.bin")
+            .to_owned()
+    } else {
+        path.to_string_lossy().into_owned()
+    }
+}
+
+fn saved_token_count(body: &serde_json::Value) -> u64 {
+    body.get("n_saved")
+        .and_then(|value| value.as_u64())
+        .filter(|value| *value > 0)
+        .or_else(|| body.get("n_written").and_then(|value| value.as_u64()))
+        .unwrap_or(0)
+}
+
 fn timestamp(value: &SystemTime) -> String {
     value
         .duration_since(UNIX_EPOCH)
@@ -475,7 +513,7 @@ async fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::KvCacheManager;
+    use super::{backend_filename, saved_token_count, KvCacheManager};
     use axum::{
         extract::{Path, Query},
         response::IntoResponse,
@@ -496,6 +534,28 @@ mod tests {
         sync::oneshot,
         time::{sleep, Duration},
     };
+
+    #[test]
+    fn backend_slot_filename_uses_basename_when_server_save_path_is_enabled() {
+        let local = std::path::Path::new("/tmp/harness/real-metal.bin");
+        assert_eq!(backend_filename(local, true), "real-metal.bin");
+        assert_eq!(
+            backend_filename(local, false),
+            "/tmp/harness/real-metal.bin"
+        );
+    }
+
+    #[test]
+    fn kv_save_uses_written_bytes_when_server_reports_zero_saved_tokens() {
+        assert_eq!(
+            saved_token_count(&json!({"n_saved": 0, "n_written": 40})),
+            40
+        );
+        assert_eq!(
+            saved_token_count(&json!({"n_saved": 3, "n_written": 40})),
+            3
+        );
+    }
 
     #[test]
     fn loads_index_and_sanitizes_snapshot_paths() {
@@ -614,6 +674,29 @@ mod tests {
         assert_eq!(saves.load(Ordering::SeqCst), 1);
         assert_eq!(manager.snapshot()[0].saved_tokens, 3);
         assert!(manager.restore(1, "session").await.is_ok());
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn saves_server_relative_snapshot_into_local_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend_dir = dir.path().join("backend-slots");
+        let local_dir = dir.path().join("local-cache");
+        let saves = Arc::new(AtomicUsize::new(0));
+        let (base, shutdown) = slot_server(backend_dir.clone(), saves).await;
+        let manager = KvCacheManager::new(
+            reqwest::Client::new(),
+            base,
+            &local_dir,
+            dir.path().join("index.json"),
+            1,
+            None,
+        )
+        .with_backend_save_path(Some(backend_dir.clone()));
+        let result = manager.save(0, "relative-key").await.unwrap();
+        assert_eq!(result.snapshot.unwrap().saved_tokens, 3);
+        assert!(manager.cache_file_path("relative-key").is_file());
+        assert!(backend_dir.join("relative-key.bin").is_file());
         let _ = shutdown.send(());
     }
 

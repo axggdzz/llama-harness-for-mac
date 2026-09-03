@@ -18,3 +18,8 @@
 
 使用该真实二进制接入 Rust 网关的失败路径也已验证：请求返回结构化 `502`
 （`backend exited before readiness`），网关退出后不保留测试后端。
+
+llama.cpp 0.3.0 的 KV API 还要求启动参数包含 `--slot-save-path <dir>`，请求中的
+`filename` 必须是 basename。配置解析会自动识别该参数，保存时向后端发送 basename，
+再将后端目录中的文件复制到 Application Support 本地缓存；`n_saved=0` 但
+`n_written>0` 的响应按有效快照处理。

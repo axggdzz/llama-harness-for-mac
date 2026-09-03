@@ -152,3 +152,8 @@ directory, so a second process exits before binding the fixed frontend port.
 SSE forwarding is event-incremental (including LF/CRLF and comment keep-alives);
 length-terminated rounds are continued without buffering already forwarded
 events.
+
+For llama.cpp versions that require it, include `--slot-save-path /path/to/slots`
+in `LLAMA_SERVER_ARGS`. The gateway detects this setting, uses the server's
+relative slot filename protocol, and copies validated snapshots into its local
+Application Support cache.

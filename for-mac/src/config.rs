@@ -170,6 +170,18 @@ impl AppConfig {
                 ready_poll_ms: self.ready_poll_ms,
             })
     }
+
+    pub fn backend_slot_save_path(&self) -> Option<PathBuf> {
+        self.backend_args
+            .windows(2)
+            .find(|pair| pair[0] == "--slot-save-path")
+            .map(|pair| PathBuf::from(&pair[1]))
+            .or_else(|| {
+                self.backend_args
+                    .iter()
+                    .find_map(|arg| arg.strip_prefix("--slot-save-path=").map(PathBuf::from))
+            })
+    }
 }
 
 fn default_gateway_port() -> u16 {
@@ -263,5 +275,14 @@ mod tests {
             super::parse_backend_args(r#"["--model","model path.gguf","--ctx-size","4096"]"#),
             vec!["--model", "model path.gguf", "--ctx-size", "4096"]
         );
+    }
+
+    #[test]
+    fn backend_slot_save_path_accepts_separate_or_equals_argument() {
+        let mut config = super::AppConfig::default();
+        config.backend_args = vec!["--slot-save-path".into(), "/tmp/slots".into()];
+        assert_eq!(config.backend_slot_save_path(), Some("/tmp/slots".into()));
+        config.backend_args = vec!["--slot-save-path=/tmp/slots".into()];
+        assert_eq!(config.backend_slot_save_path(), Some("/tmp/slots".into()));
     }
 }
