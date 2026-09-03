@@ -106,3 +106,8 @@ Phase 4D adds bad_alloc/OOM recovery. Configure `crash_recovery_enabled` and
 `max_crash_count`; recognized OOM responses stop the backend process group and
 return 503, while a later request can restart it. The recovery circuit breaker
 prevents repeated restart loops.
+
+Phase 5A adds rotating main/slot/error logs and request statistics. Logs use
+macOS Application Support-compatible paths; `request_dump_enabled` is off by
+default. `GET /__stats__` returns request, token, restore, and slot counters for
+the future dashboard UI.

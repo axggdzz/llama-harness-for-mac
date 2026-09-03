@@ -55,6 +55,12 @@ pub struct AppConfig {
     pub auto_preemptive_prefixes: Vec<String>,
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+    #[serde(default)]
+    pub log_dir: Option<PathBuf>,
+    #[serde(default = "default_log_max_bytes")]
+    pub log_max_bytes: u64,
+    #[serde(default)]
+    pub request_dump_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +101,9 @@ impl Default for AppConfig {
             slot_bindings_path: None,
             auto_preemptive_prefixes: Vec::new(),
             data_dir: default_data_dir(),
+            log_dir: None,
+            log_max_bytes: default_log_max_bytes(),
+            request_dump_enabled: false,
         }
     }
 }
@@ -167,6 +176,9 @@ fn default_data_dir() -> PathBuf {
     ProjectDirs::from("com", "axggdzz", "LlamaHarness")
         .map(|dirs| dirs.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from(".llama-harness"))
+}
+fn default_log_max_bytes() -> u64 {
+    10 * 1024 * 1024
 }
 
 #[cfg(test)]

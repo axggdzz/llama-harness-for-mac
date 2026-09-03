@@ -104,6 +104,15 @@ async fn gateway_starts_backend_for_json_and_streaming_requests() {
         serde_json::to_value(LifecyclePhase::Running).unwrap()
     );
     assert_eq!(status["bindings"][0]["key"], "webui_same-session");
+    let stats = client
+        .get(format!("{base}/__stats__"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert!(stats["requests"].as_u64().unwrap() >= 3);
     let backend_pid = gateway.backend_pid().await.expect("running backend pid");
     let _ = shutdown_tx.send(());
     serving.await.unwrap();

@@ -1,6 +1,7 @@
 use crate::{
     config::AppConfig,
     lifecycle::LifecyclePhase,
+    observability::{LogKind, RotatingLogger, Stats},
     process::{BackendHandle, BackendProcess},
     slot_affinity::{SlotAffinity, SlotBinding},
     thinking,
@@ -53,6 +54,8 @@ struct GatewayInner {
     request_gate: Mutex<()>,
     thinking_mode: Mutex<thinking::ThinkingMode>,
     crash_count: AtomicUsize,
+    logger: Option<Arc<RotatingLogger>>,
+    stats: Arc<Stats>,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,6 +89,13 @@ impl Gateway {
         } else {
             None
         };
+        let log_dir = config
+            .log_dir
+            .clone()
+            .unwrap_or_else(|| config.data_dir.join("logs"));
+        let logger = RotatingLogger::new(log_dir, config.log_max_bytes)
+            .ok()
+            .map(Arc::new);
         Self {
             inner: Arc::new(GatewayInner {
                 config,
@@ -102,6 +112,8 @@ impl Gateway {
                 request_gate: Mutex::new(()),
                 thinking_mode: Mutex::new(initial_thinking_mode),
                 crash_count: AtomicUsize::new(0),
+                logger,
+                stats: Arc::new(Stats::default()),
             }),
         }
     }
@@ -110,6 +122,7 @@ impl Gateway {
         Router::new()
             .route("/__status__", get(status))
             .route("/health", get(gateway_health))
+            .route("/__stats__", get(stats))
             .route("/v1/*path", any(proxy))
             .with_state(self)
     }
@@ -244,6 +257,7 @@ impl Gateway {
             *self.inner.phase.write().await = LifecyclePhase::Running;
         }
         self.inner.inflight.fetch_add(1, Ordering::SeqCst);
+        self.inner.stats.record_request();
         *self.inner.last_activity.lock().await = Instant::now();
     }
 
@@ -306,6 +320,10 @@ async fn status(State(gateway): State<Arc<Gateway>>) -> impl IntoResponse {
     Json(gateway.status().await)
 }
 
+async fn stats(State(gateway): State<Arc<Gateway>>) -> impl IntoResponse {
+    Json(gateway.inner.stats.snapshot())
+}
+
 async fn gateway_health(State(gateway): State<Arc<Gateway>>) -> Response {
     let status = gateway.status().await;
     if status.backend_ready {
@@ -343,6 +361,12 @@ async fn proxy_inner(
             &gateway.inner.config.auto_preemptive_prefixes,
         )
     });
+    if let Some(allocation) = &allocation {
+        gateway.inner.stats.record_slot(allocation.slot);
+        if let Some(logger) = &gateway.inner.logger {
+            let _ = logger.write(LogKind::Slot(allocation.slot), "request allocated");
+        }
+    }
     let backend = match gateway.ensure_backend().await {
         Ok(backend) => backend,
         Err(error) => return error_response(StatusCode::BAD_GATEWAY, error.to_string()),
@@ -352,7 +376,8 @@ async fn proxy_inner(
         .uri()
         .path_and_query()
         .map(|value| value.as_str())
-        .unwrap_or("/v1");
+        .unwrap_or("/v1")
+        .to_owned();
     let url = format!("{}{}", backend.base_url(), path);
     let method = request.method().clone();
     let is_chat_completion = method == axum::http::Method::POST
@@ -362,6 +387,15 @@ async fn proxy_inner(
         Ok(body) => body,
         Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
     };
+    if let Some(logger) = &gateway.inner.logger {
+        let _ = logger.write(LogKind::Main, &format!("request {} {}", method, path));
+        if gateway.inner.config.request_dump_enabled {
+            let _ = logger.write(
+                LogKind::Main,
+                &format!("request_dump {}", String::from_utf8_lossy(&body)),
+            );
+        }
+    }
     let allocated_slot = allocation.as_ref().map(|item| item.slot);
     let mut body = body;
     if allocation.is_some() || gateway.inner.config.token_guard_enabled || is_chat_completion {

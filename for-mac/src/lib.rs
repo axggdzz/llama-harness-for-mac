@@ -3,6 +3,7 @@ pub mod continuation;
 pub mod gateway;
 pub mod kv_cache;
 pub mod lifecycle;
+pub mod observability;
 pub mod process;
 pub mod slot_affinity;
 pub mod thinking;
