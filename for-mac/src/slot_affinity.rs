@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Mutex,
     },
-    time::SystemTime,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +41,34 @@ struct Inner {
     tool_locked: HashSet<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistRoot {
+    #[serde(default = "default_version")]
+    version: u32,
+    #[serde(default)]
+    slot_count: usize,
+    #[serde(default)]
+    bindings: HashMap<String, PersistBinding>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistBinding {
+    slot: usize,
+    #[serde(default)]
+    last_active: String,
+    #[serde(default)]
+    preemptive: bool,
+    #[serde(default = "default_kv_cache")]
+    kv_cache: bool,
+}
+
+fn default_version() -> u32 {
+    1
+}
+fn default_kv_cache() -> bool {
+    true
+}
+
 pub struct SlotAffinity {
     slot_count: usize,
     path: PathBuf,
@@ -51,14 +79,16 @@ static NEXT_RANDOM_SLOT: AtomicUsize = AtomicUsize::new(0);
 
 impl SlotAffinity {
     pub fn new(slot_count: usize, path: impl Into<PathBuf>) -> Self {
-        Self {
+        let manager = Self {
             slot_count: slot_count.max(1),
             path: path.into(),
             inner: Mutex::new(Inner {
                 bindings: HashMap::new(),
                 tool_locked: HashSet::new(),
             }),
-        }
+        };
+        manager.load();
+        manager
     }
 
     pub fn slot_count(&self) -> usize {
@@ -155,12 +185,15 @@ impl SlotAffinity {
                 record.preemptive = true;
             }
             record.last_active = SystemTime::now();
-            return SlotAllocation {
+            let allocation = SlotAllocation {
                 slot: record.slot,
                 key: Some(key),
                 new_binding: false,
                 evicted: None,
             };
+            drop(guard);
+            self.persist();
+            return allocation;
         }
 
         let used: HashSet<usize> = guard.bindings.values().map(|record| record.slot).collect();
@@ -227,12 +260,15 @@ impl SlotAffinity {
                 kv_cache: true,
             },
         );
-        SlotAllocation {
+        let allocation = SlotAllocation {
             slot,
             key: Some(key),
             new_binding: true,
             evicted,
-        }
+        };
+        drop(guard);
+        self.persist();
+        allocation
     }
 
     pub fn set_preemptive(&self, key: &str, value: bool) {
@@ -253,6 +289,8 @@ impl SlotAffinity {
                     .preemptive = value;
             }
         }
+        drop(guard);
+        self.persist();
     }
 
     pub fn is_preemptive(&self, key: &str) -> bool {
@@ -280,16 +318,172 @@ impl SlotAffinity {
     }
 
     pub fn set_kv_cache(&self, key: &str, value: bool) {
-        if let Some(record) = self
-            .inner
-            .lock()
-            .expect("slot affinity mutex poisoned")
-            .bindings
-            .get_mut(key)
-        {
+        let mut guard = self.inner.lock().expect("slot affinity mutex poisoned");
+        if let Some(record) = guard.bindings.get_mut(key) {
             record.kv_cache = value;
         }
+        drop(guard);
+        self.persist();
     }
+
+    pub fn enforce_preemptive_cap(&self) -> Vec<String> {
+        let mut guard = self.inner.lock().expect("slot affinity mutex poisoned");
+        let cap = self.slot_count.saturating_sub(1);
+        let mut keys = guard
+            .bindings
+            .iter()
+            .filter(|(_, record)| record.preemptive)
+            .map(|(key, record)| {
+                (
+                    key.clone(),
+                    record.last_active,
+                    guard.tool_locked.contains(key),
+                )
+            })
+            .collect::<Vec<_>>();
+        if keys.len() <= cap {
+            return Vec::new();
+        }
+        keys.sort_by_key(|(_, last_active, tool_locked)| (!*tool_locked, *last_active));
+        let mut demoted = Vec::new();
+        for (key, _, _) in keys.into_iter().take(
+            guard
+                .bindings
+                .values()
+                .filter(|record| record.preemptive)
+                .count()
+                - cap,
+        ) {
+            if let Some(record) = guard.bindings.get_mut(&key) {
+                record.preemptive = false;
+                demoted.push(key.clone());
+            }
+            guard.tool_locked.remove(&key);
+        }
+        drop(guard);
+        if !demoted.is_empty() {
+            self.persist();
+        }
+        demoted
+    }
+
+    fn load(&self) {
+        let Ok(text) = std::fs::read_to_string(&self.path) else {
+            return;
+        };
+        let Ok(root) = serde_json::from_str::<PersistRoot>(&text) else {
+            return;
+        };
+        let mut guard = self.inner.lock().expect("slot affinity mutex poisoned");
+        let mut used = HashSet::new();
+        for (key, value) in root.bindings {
+            if key.is_empty() || value.slot >= self.slot_count || !used.insert(value.slot) {
+                continue;
+            }
+            let Some(last_active) = parse_timestamp(&value.last_active) else {
+                continue;
+            };
+            guard.bindings.insert(
+                key,
+                BindingRecord {
+                    slot: value.slot,
+                    last_active,
+                    preemptive: value.preemptive,
+                    kv_cache: value.kv_cache,
+                },
+            );
+        }
+        let cap = self.slot_count.saturating_sub(1);
+        if guard
+            .bindings
+            .values()
+            .filter(|record| record.preemptive)
+            .count()
+            > cap
+        {
+            let mut keys = guard
+                .bindings
+                .iter()
+                .filter(|(_, record)| record.preemptive)
+                .map(|(key, record)| (key.clone(), record.last_active))
+                .collect::<Vec<_>>();
+            keys.sort_by_key(|(_, last_active)| *last_active);
+            for (key, _) in keys.into_iter().take(
+                guard
+                    .bindings
+                    .values()
+                    .filter(|record| record.preemptive)
+                    .count()
+                    - cap,
+            ) {
+                if let Some(record) = guard.bindings.get_mut(&key) {
+                    record.preemptive = false;
+                }
+            }
+        }
+    }
+
+    fn persist(&self) {
+        let guard = self.inner.lock().expect("slot affinity mutex poisoned");
+        let root = PersistRoot {
+            version: 1,
+            slot_count: self.slot_count,
+            bindings: guard
+                .bindings
+                .iter()
+                .map(|(key, record)| {
+                    (
+                        key.clone(),
+                        PersistBinding {
+                            slot: record.slot,
+                            last_active: format_timestamp(record.last_active),
+                            preemptive: record.preemptive,
+                            kv_cache: record.kv_cache,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        drop(guard);
+        let Some(parent) = self.path.parent() else {
+            return;
+        };
+        if std::fs::create_dir_all(parent).is_err() {
+            tracing::warn!(path = %self.path.display(), "failed to create slot binding directory");
+            return;
+        }
+        let temp = self
+            .path
+            .with_extension(format!("tmp-{}", std::process::id()));
+        let Ok(json) = serde_json::to_vec_pretty(&root) else {
+            return;
+        };
+        if std::fs::write(&temp, json)
+            .and_then(|_| std::fs::rename(&temp, &self.path))
+            .is_err()
+        {
+            let _ = std::fs::remove_file(&temp);
+            tracing::warn!(path = %self.path.display(), "failed to persist slot bindings");
+        }
+    }
+}
+
+fn format_timestamp(value: SystemTime) -> String {
+    value
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .to_string()
+}
+
+fn parse_timestamp(value: &str) -> Option<SystemTime> {
+    if let Ok(millis) = value.parse::<u64>() {
+        return UNIX_EPOCH.checked_add(Duration::from_millis(millis));
+    }
+    if value.ends_with('Z') && value.contains('T') {
+        return Some(UNIX_EPOCH);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -409,5 +603,48 @@ mod tests {
         assert!(manager.is_preemptive("webui_one"));
         manager.unmark_tool_locked("webui_one");
         assert!(manager.is_preemptive("webui_one"));
+    }
+
+    #[test]
+    fn restores_binding_state_and_skips_corrupt_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bindings.json");
+        let manager = SlotAffinity::new(2, &path);
+        manager.allocate(&key_headers("one"), &[]);
+        manager.set_preemptive("webui_one", true);
+        manager.set_kv_cache("webui_one", false);
+        let restored = SlotAffinity::new(2, &path);
+        let binding = restored
+            .snapshot()
+            .into_iter()
+            .find(|b| b.key == "webui_one")
+            .unwrap();
+        assert_eq!(binding.slot, 0);
+        assert!(binding.preemptive);
+        assert!(!binding.kv_cache);
+
+        std::fs::write(&path, "{not-json").unwrap();
+        assert!(SlotAffinity::new(2, &path).snapshot().is_empty());
+    }
+
+    #[test]
+    fn skips_out_of_range_and_duplicate_slots_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bindings.json");
+        std::fs::write(
+            &path,
+            r#"{
+            "version": 1, "slot_count": 9,
+            "bindings": {
+                "webui_one": {"slot": 0, "last_active": "2026-09-03T00:00:00Z"},
+                "webui_two": {"slot": 0, "last_active": "2026-09-03T00:00:00Z"},
+                "webui_bad": {"slot": 8, "last_active": "2026-09-03T00:00:00Z"}
+            }
+        }"#,
+        )
+        .unwrap();
+        let snapshot = SlotAffinity::new(2, &path).snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert!(snapshot[0].key == "webui_one" || snapshot[0].key == "webui_two");
     }
 }

@@ -24,6 +24,12 @@ pub struct AppConfig {
     pub idle_timeout_ms: u64,
     #[serde(default = "default_sleep_observe_ms")]
     pub sleep_observe_ms: u64,
+    #[serde(default = "default_slot_count")]
+    pub slot_count: usize,
+    #[serde(default)]
+    pub slot_bindings_path: Option<PathBuf>,
+    #[serde(default)]
+    pub auto_preemptive_prefixes: Vec<String>,
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
 }
@@ -51,6 +57,9 @@ impl Default for AppConfig {
             warming_delay_ms: 0,
             idle_timeout_ms: default_idle_timeout_ms(),
             sleep_observe_ms: default_sleep_observe_ms(),
+            slot_count: default_slot_count(),
+            slot_bindings_path: None,
+            auto_preemptive_prefixes: Vec::new(),
             data_dir: default_data_dir(),
         }
     }
@@ -91,6 +100,9 @@ fn default_idle_timeout_ms() -> u64 {
 }
 fn default_sleep_observe_ms() -> u64 {
     10_000
+}
+fn default_slot_count() -> usize {
+    1
 }
 
 fn default_data_dir() -> PathBuf {
