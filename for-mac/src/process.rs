@@ -78,6 +78,15 @@ impl BackendHandle {
         format!("http://{}:{}", self.config.host, self.config.port)
     }
 
+    pub async fn is_running(&self) -> bool {
+        self.child
+            .lock()
+            .await
+            .as_mut()
+            .and_then(|child| child.try_wait().ok())
+            .is_none()
+    }
+
     pub async fn wait_ready(&self) -> Result<()> {
         let deadline = Instant::now() + Duration::from_millis(self.config.ready_timeout_ms);
         let url = format!("{}/health", self.base_url());

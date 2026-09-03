@@ -14,10 +14,17 @@ use axum::{
 };
 use reqwest::Client;
 use serde::Serialize;
-use std::sync::Arc;
+use std::{
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::{
     net::TcpListener,
-    sync::{watch, Mutex, RwLock},
+    sync::{watch, Mutex, Notify, RwLock},
+    time::{sleep, Instant},
 };
 
 #[derive(Clone)]
@@ -32,6 +39,11 @@ struct GatewayInner {
     backend: Mutex<Option<Arc<BackendHandle>>>,
     startup_in_progress: Mutex<bool>,
     startup_changed: watch::Sender<u64>,
+    inflight: AtomicUsize,
+    last_activity: Mutex<Instant>,
+    sleep_cancel: Arc<Notify>,
+    monitor_stop: Arc<Notify>,
+    request_gate: Mutex<()>,
 }
 
 #[derive(Debug, Serialize)]
@@ -39,6 +51,7 @@ struct StatusResponse {
     phase: LifecyclePhase,
     backend_ready: bool,
     backend_port: u16,
+    inflight: usize,
 }
 
 impl Gateway {
@@ -52,6 +65,11 @@ impl Gateway {
                 backend: Mutex::new(None),
                 startup_in_progress: Mutex::new(false),
                 startup_changed,
+                inflight: AtomicUsize::new(0),
+                last_activity: Mutex::new(Instant::now()),
+                sleep_cancel: Arc::new(Notify::new()),
+                monitor_stop: Arc::new(Notify::new()),
+                request_gate: Mutex::new(()),
             }),
         }
     }
@@ -69,9 +87,12 @@ impl Gateway {
         listener: TcpListener,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<()> {
+        let monitor = tokio::spawn(self.clone().idle_monitor());
         let result = axum::serve(listener, self.clone().router())
             .with_graceful_shutdown(shutdown)
             .await;
+        self.inner.monitor_stop.notify_waiters();
+        let _ = monitor.await;
         self.shutdown().await?;
         result.map_err(|error| anyhow!(error))
     }
@@ -83,6 +104,10 @@ impl Gateway {
         }
         *self.inner.phase.write().await = LifecyclePhase::Standby;
         Ok(())
+    }
+
+    pub async fn stop_now(&self) -> Result<()> {
+        self.shutdown().await
     }
 
     pub async fn backend_pid(&self) -> Option<u32> {
@@ -114,6 +139,10 @@ impl Gateway {
             let result = self.start_backend().await;
             match result {
                 Ok(backend) => {
+                    *self.inner.phase.write().await = LifecyclePhase::Warming;
+                    if self.inner.config.warming_delay_ms > 0 {
+                        sleep(Duration::from_millis(self.inner.config.warming_delay_ms)).await;
+                    }
                     *self.inner.backend.lock().await = Some(backend.clone());
                     *self.inner.phase.write().await = LifecyclePhase::Running;
                     self.finish_startup().await;
@@ -154,7 +183,70 @@ impl Gateway {
             phase: *self.inner.phase.read().await,
             backend_ready: self.inner.backend.lock().await.is_some(),
             backend_port: self.inner.config.backend_port,
+            inflight: self.inner.inflight.load(Ordering::SeqCst),
         }
+    }
+
+    async fn begin_request(&self) {
+        let _gate = self.inner.request_gate.lock().await;
+        if *self.inner.phase.read().await == LifecyclePhase::Sleeping {
+            self.inner.sleep_cancel.notify_one();
+            *self.inner.phase.write().await = LifecyclePhase::Running;
+        }
+        self.inner.inflight.fetch_add(1, Ordering::SeqCst);
+        *self.inner.last_activity.lock().await = Instant::now();
+    }
+
+    async fn end_request(&self) {
+        self.inner.inflight.fetch_sub(1, Ordering::SeqCst);
+        *self.inner.last_activity.lock().await = Instant::now();
+    }
+
+    async fn idle_monitor(self: Arc<Self>) {
+        let interval_ms = (self.inner.config.idle_timeout_ms / 4).clamp(10, 1_000);
+        let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => self.maybe_sleep().await,
+                _ = self.inner.monitor_stop.notified() => break,
+            }
+        }
+    }
+
+    async fn maybe_sleep(&self) {
+        let gate = self.inner.request_gate.lock().await;
+        if *self.inner.phase.read().await != LifecyclePhase::Running
+            || self.inner.inflight.load(Ordering::SeqCst) != 0
+            || self.inner.last_activity.lock().await.elapsed()
+                < Duration::from_millis(self.inner.config.idle_timeout_ms)
+        {
+            return;
+        }
+
+        *self.inner.phase.write().await = LifecyclePhase::Sleeping;
+        drop(gate);
+        tokio::select! {
+            _ = sleep(Duration::from_millis(self.inner.config.sleep_observe_ms)) => {},
+            _ = self.inner.sleep_cancel.notified() => {
+                *self.inner.phase.write().await = LifecyclePhase::Running;
+                return;
+            },
+        }
+
+        let _gate = self.inner.request_gate.lock().await;
+        if self.inner.inflight.load(Ordering::SeqCst) != 0
+            || self.inner.last_activity.lock().await.elapsed()
+                < Duration::from_millis(self.inner.config.idle_timeout_ms)
+        {
+            *self.inner.phase.write().await = LifecyclePhase::Running;
+            return;
+        }
+
+        let backend = self.inner.backend.lock().await.take();
+        if let Some(backend) = backend {
+            let _ = backend.stop().await;
+        }
+        *self.inner.phase.write().await = LifecyclePhase::Standby;
     }
 }
 
@@ -172,6 +264,13 @@ async fn gateway_health(State(gateway): State<Arc<Gateway>>) -> Response {
 }
 
 async fn proxy(State(gateway): State<Arc<Gateway>>, request: Request<Body>) -> Response {
+    gateway.begin_request().await;
+    let response = proxy_inner(&gateway, request).await;
+    gateway.end_request().await;
+    response
+}
+
+async fn proxy_inner(gateway: &Gateway, request: Request<Body>) -> Response {
     let backend = match gateway.ensure_backend().await {
         Ok(backend) => backend,
         Err(error) => return error_response(StatusCode::BAD_GATEWAY, error.to_string()),

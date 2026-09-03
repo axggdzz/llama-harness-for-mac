@@ -18,6 +18,12 @@ pub struct AppConfig {
     pub ready_timeout_ms: u64,
     #[serde(default = "default_ready_poll_ms")]
     pub ready_poll_ms: u64,
+    #[serde(default)]
+    pub warming_delay_ms: u64,
+    #[serde(default = "default_idle_timeout_ms")]
+    pub idle_timeout_ms: u64,
+    #[serde(default = "default_sleep_observe_ms")]
+    pub sleep_observe_ms: u64,
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
 }
@@ -42,6 +48,9 @@ impl Default for AppConfig {
             backend_args: Vec::new(),
             ready_timeout_ms: default_ready_timeout_ms(),
             ready_poll_ms: default_ready_poll_ms(),
+            warming_delay_ms: 0,
+            idle_timeout_ms: default_idle_timeout_ms(),
+            sleep_observe_ms: default_sleep_observe_ms(),
             data_dir: default_data_dir(),
         }
     }
@@ -76,6 +85,12 @@ fn default_ready_timeout_ms() -> u64 {
 }
 fn default_ready_poll_ms() -> u64 {
     100
+}
+fn default_idle_timeout_ms() -> u64 {
+    15 * 60 * 1000
+}
+fn default_sleep_observe_ms() -> u64 {
+    10_000
 }
 
 fn default_data_dir() -> PathBuf {

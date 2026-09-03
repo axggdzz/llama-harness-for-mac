@@ -60,6 +60,8 @@ curl http://127.0.0.1:18081/v1/chat/completions \
   -d '{"model":"mock","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-Phase 1 intentionally does not include the dashboard UI, SlotAffinity, KV
+Phase 1 and 2 intentionally do not include the dashboard UI, SlotAffinity, KV
 snapshots, TokenGuard, continuation, or crash-recovery policies; those are the
-next migration stages described in `docs/spec.md`.
+next migration stages described in `docs/spec.md`. Phase 2 adds the
+`Standby/Waking/Warming/Running/Sleeping` scheduler, configurable idle sleep,
+and cancellation of the sleep observation window when a new request arrives.
