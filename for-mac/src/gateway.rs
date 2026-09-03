@@ -3,7 +3,7 @@ use crate::{
     kv_cache::KvCacheManager,
     lifecycle::LifecyclePhase,
     observability::{LogKind, RotatingLogger, Stats},
-    process::{BackendHandle, BackendProcess},
+    process::{BackendCapabilities, BackendHandle, BackendProcess},
     resources::ResourceSnapshot,
     slot_affinity::{SlotAffinity, SlotBinding},
     thinking,
@@ -147,6 +147,7 @@ impl Gateway {
             .route("/__kv/erase", post(kv_erase))
             .route("/__kv/clear", post(kv_clear))
             .route("/__resources__", get(resources))
+            .route("/__capabilities__", get(capabilities))
             .route("/__backend/slots", get(backend_slots))
             .route("/__backend/props", get(backend_props))
             .route("/__backend/metrics", get(backend_metrics))
@@ -473,6 +474,15 @@ async fn kv_clear(State(gateway): State<Arc<Gateway>>) -> Response {
 
 async fn resources() -> impl IntoResponse {
     Json(ResourceSnapshot::collect())
+}
+
+async fn capabilities(State(gateway): State<Arc<Gateway>>) -> Response {
+    let backend = match gateway.ensure_backend().await {
+        Ok(backend) => backend,
+        Err(error) => return error_response(StatusCode::BAD_GATEWAY, error.to_string()),
+    };
+    let capabilities: BackendCapabilities = backend.probe_capabilities().await;
+    Json(capabilities).into_response()
 }
 
 async fn backend_slots(State(gateway): State<Arc<Gateway>>) -> Response {

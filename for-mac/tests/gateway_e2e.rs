@@ -141,6 +141,18 @@ async fn gateway_starts_backend_for_json_and_streaming_requests() {
         .json::<serde_json::Value>()
         .await
         .unwrap();
+    let capabilities = client
+        .get(format!("{base}/__capabilities__"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(capabilities["props"], true);
+    assert_eq!(capabilities["slots"], true);
+    assert_eq!(capabilities["metrics"], true);
+    assert_eq!(capabilities["tokenize"], true);
     assert!(resources.get("gpu_backend").is_some());
     let metrics = client
         .get(format!("{base}/__backend/metrics"))

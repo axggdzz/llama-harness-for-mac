@@ -11,6 +11,7 @@ async function refresh() {
     const config = await json('/__config__'); $('gateway-port').value = config.gateway_port; $('backend-port').value = config.backend_port; $('thinking-mode').value = config.thinking_mode;
     const stats = await json('/__stats__'); $('stat-requests').textContent = stats.requests; $('stat-prompt').textContent = stats.prompt_tokens; $('stat-completion').textContent = stats.completion_tokens; $('stat-speed').textContent = `${stats.speed_tokens_per_second} tok/s`; $('stat-hit').textContent = `${stats.restore_hits}/${stats.restore_hits + stats.restore_misses}`;
     const resources = await json('/__resources__'); $('cpu').textContent = `${resources.cpu_usage_percent.toFixed(1)}%`; $('memory').textContent = `${(resources.used_memory_bytes / 1073741824).toFixed(1)} / ${(resources.total_memory_bytes / 1073741824).toFixed(1)} GB`; $('gpu').textContent = resources.gpu_backend;
+    const capabilities = await json('/__capabilities__'); $('capabilities-output').textContent = Object.entries(capabilities).map(([name, supported]) => `${name}: ${supported ? '可用' : '不可用'}`).join('\n');
     $('log-output').textContent = await (await request('/__logs__?kind=main&max_bytes=32768')).text();
   } catch (error) { $('health-dot').classList.remove('ok'); $('health-text').textContent = '网关未连接'; }
 }

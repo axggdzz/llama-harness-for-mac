@@ -1,6 +1,7 @@
 use crate::config::BackendConfig;
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
+use serde::Serialize;
 use std::process::Stdio;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -13,6 +14,14 @@ use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Instant};
 
 pub struct BackendProcess;
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BackendCapabilities {
+    pub props: bool,
+    pub slots: bool,
+    pub metrics: bool,
+    pub tokenize: bool,
+}
 
 pub struct BackendHandle {
     child: Arc<Mutex<Option<Child>>>,
@@ -143,6 +152,30 @@ impl BackendHandle {
             }
 
             sleep(Duration::from_millis(self.config.ready_poll_ms).min(remaining)).await;
+        }
+    }
+
+    pub async fn probe_capabilities(&self) -> BackendCapabilities {
+        let probe = |path: String| async {
+            self.client
+                .get(path)
+                .send()
+                .await
+                .map(|response| response.status().is_success())
+                .unwrap_or(false)
+        };
+        BackendCapabilities {
+            props: probe(format!("{}/props", self.base_url())).await,
+            slots: probe(format!("{}/slots", self.base_url())).await,
+            metrics: probe(format!("{}/metrics", self.base_url())).await,
+            tokenize: self
+                .client
+                .post(format!("{}/v1/tokenize", self.base_url()))
+                .json(&serde_json::json!({"content":""}))
+                .send()
+                .await
+                .map(|response| response.status().is_success())
+                .unwrap_or(false),
         }
     }
 
