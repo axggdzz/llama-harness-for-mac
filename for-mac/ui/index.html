@@ -12,8 +12,8 @@
       <div class="brand"><span class="brand-mark">λ</span><div><strong>LlamaHarness</strong><small>macOS Metal</small></div></div>
       <section class="control-panel">
         <div class="section-title">控制面板</div>
-        <label>前端端口<input id="gateway-port" value="8080" /></label>
-        <label>后端端口<input id="backend-port" value="8081" /></label>
+        <label>前端端口<input id="control-gateway-port" value="8080" /></label>
+        <label>后端端口<input id="control-backend-port" value="8081" /></label>
         <label>闲置休眠<select id="idle-mode"><option>自动</option><option>关闭</option></select></label>
         <button class="primary" id="wake">启动 / 唤醒后端</button>
         <button class="danger" id="stop">停止后端</button>
@@ -27,11 +27,11 @@
       </nav>
       <section class="content">
         <div class="tab-page active" id="page-logs"><div class="panel"><div class="panel-head"><h2>主日志</h2><span class="badge green">实时</span></div><pre id="log-output">等待网关事件…</pre></div></div>
-        <div class="tab-page" id="page-stats"><div class="cards"><div class="metric"><span>请求数</span><strong id="stat-requests">—</strong></div><div class="metric"><span>Prompt tokens</span><strong id="stat-prompt">—</strong></div><div class="metric"><span>Completion tokens</span><strong id="stat-completion">—</strong></div><div class="metric"><span>恢复命中率</span><strong id="stat-hit">—</strong></div></div></div>
+        <div class="tab-page" id="page-stats"><div class="cards"><div class="metric"><span>请求数</span><strong id="stat-requests">—</strong></div><div class="metric"><span>Prompt tokens</span><strong id="stat-prompt">—</strong></div><div class="metric"><span>Completion tokens</span><strong id="stat-completion">—</strong></div><div class="metric"><span>速度</span><strong id="stat-speed">—</strong></div><div class="metric"><span>恢复命中率</span><strong id="stat-hit">—</strong></div></div></div>
         <div class="tab-page" id="page-affinity"><div class="panel"><div class="panel-head"><h2>槽位绑定</h2><span class="muted" id="binding-count">0 个绑定</span></div><table><thead><tr><th>Key</th><th>应用</th><th>Slot</th><th>状态</th></tr></thead><tbody id="binding-table"></tbody></table></div></div>
-        <div class="tab-page" id="page-slots"><div class="panel"><div class="panel-head"><h2>槽位管理</h2><button class="small" id="probe-slots">采集 /slots</button></div><pre id="slots-output">点击采集后显示后端原始响应</pre></div></div>
+        <div class="tab-page" id="page-slots"><div class="panel"><div class="panel-head"><h2>槽位管理</h2><div><button class="small" id="probe-slots">采集 /slots</button><button class="small" id="probe-metrics">采集 /metrics</button></div></div><div class="kv-tools"><input id="kv-key" placeholder="快照 Key" /><input id="kv-slot" type="number" min="0" value="0" /><button class="small" id="kv-save">保存 KV</button><button class="small" id="kv-restore">恢复 KV</button><button class="small" id="kv-erase">擦除 Slot</button><button class="small" id="kv-clear">清空快照</button></div><pre id="kv-output">快照列表加载中…</pre><pre id="slots-output">点击采集后显示后端原始响应</pre><pre id="metrics-output">点击采集后显示 /metrics 原始响应</pre></div></div>
         <div class="tab-page" id="page-resources"><div class="cards"><div class="metric"><span>CPU 使用率</span><strong id="cpu">—</strong></div><div class="metric"><span>统一内存</span><strong id="memory">—</strong></div><div class="metric wide"><span>Metal 能力</span><strong id="gpu">—</strong></div></div></div>
-        <div class="tab-page" id="page-config"><div class="panel form-grid"><label>Token Guard<input value="按配置文件读取" disabled /></label><label>思考模式<select><option>Off（极速）</option><option>Low（轻度）</option><option>Medium（中度）</option><option>XHigh（深度）</option></select></label><label>数据目录<input value="~/Library/Application Support/LlamaHarness" disabled /></label><button class="primary">保存配置</button></div></div>
+        <div class="tab-page" id="page-config"><div class="panel form-grid"><label>前端端口<input id="gateway-port" value="8080" /></label><label>后端端口<input id="backend-port" value="8081" /></label><label>Token Guard<input value="按配置文件读取" disabled /></label><label>思考模式<select id="thinking-mode"><option value="off">Off（极速）</option><option value="low">Low（轻度）</option><option value="medium">Medium（中度）</option><option value="xhigh">XHigh（深度）</option></select></label><label>数据目录<input value="~/Library/Application Support/LlamaHarness" disabled /></label><button class="primary" id="save-config">保存配置</button><span class="muted" id="config-status"></span></div></div>
         <div class="tab-page" id="page-info"><div class="panel info"><h2>后端信息</h2><pre id="props-output">点击后端探针查看 /props</pre><button class="small" id="probe-props">采集 /props</button></div></div>
       </section>
       <footer class="bottom-stats"><div><span>状态</span><strong id="footer-phase">待机</strong></div><div><span>后端</span><strong id="footer-backend">未启动</strong></div><div><span>Slot</span><strong id="footer-slots">0</strong></div><div><span>GPU</span><strong>Metal</strong></div></footer>

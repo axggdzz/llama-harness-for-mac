@@ -31,6 +31,17 @@ mod tests {
         assert_eq!(snapshot.restore_hits, 1);
         assert_eq!(snapshot.slots_in_use, 1);
     }
+
+    #[test]
+    fn read_tail_limits_log_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let logger = RotatingLogger::new(dir.path(), 1024).unwrap();
+        logger.write(LogKind::Main, "first").unwrap();
+        logger.write(LogKind::Main, "second").unwrap();
+        let tail = logger.read_tail(LogKind::Main, 7).unwrap();
+        assert!(tail.len() <= 7);
+        assert!(tail.contains("second"));
+    }
 }
 use anyhow::Result;
 use serde::Serialize;
@@ -92,6 +103,13 @@ impl RotatingLogger {
         file.write_all(line.as_bytes())?;
         file.flush()?;
         Ok(())
+    }
+
+    pub fn read_tail(&self, kind: LogKind, max_bytes: usize) -> Result<String> {
+        let _guard = self.lock.lock().expect("logger mutex poisoned");
+        let bytes = fs::read(self.path(kind)).unwrap_or_default();
+        let start = bytes.len().saturating_sub(max_bytes.max(1));
+        Ok(String::from_utf8_lossy(&bytes[start..]).into_owned())
     }
 
     fn path(&self, kind: LogKind) -> PathBuf {

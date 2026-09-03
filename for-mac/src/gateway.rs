@@ -1,5 +1,6 @@
 use crate::{
     config::AppConfig,
+    kv_cache::KvCacheManager,
     lifecycle::LifecyclePhase,
     observability::{LogKind, RotatingLogger, Stats},
     process::{BackendHandle, BackendProcess},
@@ -11,7 +12,7 @@ use crate::{
 use anyhow::{anyhow, Result};
 use axum::{
     body::{to_bytes, Body},
-    extract::State,
+    extract::{Query, State},
     http::{header, HeaderName, HeaderValue, Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{any, get, post},
@@ -19,7 +20,7 @@ use axum::{
 };
 use futures_util::Stream;
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     pin::Pin,
     sync::{
@@ -58,6 +59,7 @@ struct GatewayInner {
     crash_count: AtomicUsize,
     logger: Option<Arc<RotatingLogger>>,
     stats: Arc<Stats>,
+    kv: Arc<KvCacheManager>,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,6 +100,15 @@ impl Gateway {
         let logger = RotatingLogger::new(log_dir, config.log_max_bytes)
             .ok()
             .map(Arc::new);
+        let backend_base = format!("http://{}:{}", config.backend_host, config.backend_port);
+        let kv = Arc::new(KvCacheManager::new(
+            Client::new(),
+            backend_base,
+            config.data_dir.join("kv"),
+            config.data_dir.join("kv_cache_index.json"),
+            config.slot_count,
+            config.context_size.map(|value| value as u64),
+        ));
         Self {
             inner: Arc::new(GatewayInner {
                 config,
@@ -116,6 +127,7 @@ impl Gateway {
                 crash_count: AtomicUsize::new(0),
                 logger,
                 stats: Arc::new(Stats::default()),
+                kv,
             }),
         }
     }
@@ -128,6 +140,12 @@ impl Gateway {
             .route("/__control/stop", post(stop_backend))
             .route("/health", get(gateway_health))
             .route("/__stats__", get(stats))
+            .route("/__logs__", get(logs))
+            .route("/__kv__", get(kv_snapshots))
+            .route("/__kv/save", post(kv_save))
+            .route("/__kv/restore", post(kv_restore))
+            .route("/__kv/erase", post(kv_erase))
+            .route("/__kv/clear", post(kv_clear))
             .route("/__resources__", get(resources))
             .route("/__backend/slots", get(backend_slots))
             .route("/__backend/props", get(backend_props))
@@ -366,6 +384,93 @@ async fn stats(State(gateway): State<Arc<Gateway>>) -> impl IntoResponse {
     Json(gateway.inner.stats.snapshot())
 }
 
+#[derive(Debug, Deserialize)]
+struct LogQuery {
+    #[serde(default = "default_log_kind")]
+    kind: String,
+    #[serde(default = "default_log_bytes")]
+    max_bytes: usize,
+}
+
+fn default_log_kind() -> String {
+    "main".to_owned()
+}
+
+fn default_log_bytes() -> usize {
+    32 * 1024
+}
+
+async fn logs(State(gateway): State<Arc<Gateway>>, Query(query): Query<LogQuery>) -> Response {
+    let Some(logger) = &gateway.inner.logger else {
+        return error_response(StatusCode::NOT_FOUND, "logging is unavailable".to_owned());
+    };
+    let kind = match query.kind.as_str() {
+        "main" => LogKind::Main,
+        "error" | "errors" => LogKind::Error,
+        value
+            if value
+                .strip_prefix("slot-")
+                .and_then(|v| v.parse::<usize>().ok())
+                .is_some() =>
+        {
+            LogKind::Slot(
+                value
+                    .strip_prefix("slot-")
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap(),
+            )
+        }
+        _ => return error_response(StatusCode::BAD_REQUEST, "unknown log kind".to_owned()),
+    };
+    match logger.read_tail(kind, query.max_bytes.min(256 * 1024)) {
+        Ok(text) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(Body::from(text))
+            .unwrap(),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct KvRequest {
+    slot: usize,
+    key: String,
+}
+
+async fn kv_snapshots(State(gateway): State<Arc<Gateway>>) -> impl IntoResponse {
+    Json(gateway.inner.kv.snapshot())
+}
+
+async fn kv_save(State(gateway): State<Arc<Gateway>>, Json(input): Json<KvRequest>) -> Response {
+    match gateway.inner.kv.save(input.slot, &input.key).await {
+        Ok(result) => Json(result.response).into_response(),
+        Err(error) => error_response(StatusCode::BAD_REQUEST, error.to_string()),
+    }
+}
+
+async fn kv_restore(State(gateway): State<Arc<Gateway>>, Json(input): Json<KvRequest>) -> Response {
+    match gateway.inner.kv.restore(input.slot, &input.key).await {
+        Ok(result) => Json(result.response).into_response(),
+        Err(error) => error_response(StatusCode::BAD_REQUEST, error.to_string()),
+    }
+}
+
+async fn kv_erase(State(gateway): State<Arc<Gateway>>, Json(input): Json<KvRequest>) -> Response {
+    match gateway.inner.kv.erase(input.slot).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => error_response(StatusCode::BAD_REQUEST, error.to_string()),
+    }
+}
+
+async fn kv_clear(State(gateway): State<Arc<Gateway>>) -> Response {
+    match gateway.inner.kv.clear_all().await {
+        Ok(deleted) => Json(serde_json::json!({"deleted": deleted})).into_response(),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
 async fn resources() -> impl IntoResponse {
     Json(ResourceSnapshot::collect())
 }
@@ -478,6 +583,20 @@ async fn proxy_inner(
         }
     }
     let allocated_slot = allocation.as_ref().map(|item| item.slot);
+    let allocated_key = allocation.as_ref().and_then(|item| item.key.clone());
+    if let (Some(slot), Some(key)) = (allocated_slot, allocated_key.as_deref()) {
+        if gateway.inner.kv.has_snapshot(key) {
+            match gateway.inner.kv.restore(slot, key).await {
+                Ok(_) => gateway.inner.stats.record_restore(true),
+                Err(error) => {
+                    gateway.inner.stats.record_restore(false);
+                    tracing::warn!(target = "kv", %error, %key, "KV restore skipped");
+                }
+            }
+        } else {
+            gateway.inner.stats.record_restore(false);
+        }
+    }
     let mut body = body;
     if allocation.is_some() || gateway.inner.config.token_guard_enabled || is_chat_completion {
         if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) {

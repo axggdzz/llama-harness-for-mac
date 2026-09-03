@@ -113,6 +113,24 @@ async fn gateway_starts_backend_for_json_and_streaming_requests() {
         .await
         .unwrap();
     assert!(stats["requests"].as_u64().unwrap() >= 3);
+    let logs = client
+        .get(format!("{base}/__logs__?kind=main&max_bytes=4096"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(logs.contains("request POST /v1/chat/completions"));
+    let snapshots = client
+        .get(format!("{base}/__kv__"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert!(snapshots.is_array());
     let resources = client
         .get(format!("{base}/__resources__"))
         .send()

@@ -116,3 +116,14 @@ Phase 5B adds `GET /__resources__` for CPU/unified-memory metrics and
 `/__backend/slots`, `/__backend/props`, and `/__backend/metrics` for raw backend
 probe responses. Metal capability text is exposed instead of CUDA/NVIDIA
 assumptions.
+
+## Gateway controls and dashboard wiring
+
+`GET /__config__` reads the active configuration and `PUT /__config__` validates
+and atomically saves it under the configured Application Support data directory.
+`POST /__control/wake` and `POST /__control/stop` expose the lifecycle operations
+used by the scheduler. `GET /__logs__?kind=main&max_bytes=32768` returns a bounded
+log tail for the dashboard. KV snapshots are listed through `GET /__kv__` and
+managed with `/__kv/save`, `/__kv/restore`, `/__kv/erase`, and `/__kv/clear`;
+requests with an existing SlotAffinity snapshot attempt an automatic restore and
+update restore-hit statistics.
