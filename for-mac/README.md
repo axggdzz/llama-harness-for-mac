@@ -95,3 +95,9 @@ known context-overflow marker causes the assigned slot to be erased and the
 same request to be retried once; unrelated 400 responses and a second failure
 are passed through unchanged. Set `context_overflow_recovery=false` to disable
 this behavior.
+
+Phase 4C adds `Off/Low/Medium/XHigh` thinking-mode rewriting for chat
+completions and one-shot SSE continuation when a stream ends with
+`finish_reason=length`. Configure `continuation_enabled`,
+`max_continuations`, and `continuation_timeout_ms`; tool-call streams are
+passed through without continuation.

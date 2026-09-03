@@ -1,3 +1,4 @@
+use crate::thinking::ThinkingMode;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -37,6 +38,14 @@ pub struct AppConfig {
     #[serde(default = "default_context_overflow_recovery")]
     pub context_overflow_recovery: bool,
     #[serde(default)]
+    pub thinking_mode: ThinkingMode,
+    #[serde(default = "default_continuation_enabled")]
+    pub continuation_enabled: bool,
+    #[serde(default = "default_max_continuations")]
+    pub max_continuations: usize,
+    #[serde(default = "default_continuation_timeout_ms")]
+    pub continuation_timeout_ms: u64,
+    #[serde(default)]
     pub slot_bindings_path: Option<PathBuf>,
     #[serde(default)]
     pub auto_preemptive_prefixes: Vec<String>,
@@ -73,6 +82,10 @@ impl Default for AppConfig {
             reserved_output_tokens: default_reserved_output_tokens(),
             reserved_prompt_overhead: default_reserved_prompt_overhead(),
             context_overflow_recovery: default_context_overflow_recovery(),
+            thinking_mode: ThinkingMode::default(),
+            continuation_enabled: default_continuation_enabled(),
+            max_continuations: default_max_continuations(),
+            continuation_timeout_ms: default_continuation_timeout_ms(),
             slot_bindings_path: None,
             auto_preemptive_prefixes: Vec::new(),
             data_dir: default_data_dir(),
@@ -127,6 +140,15 @@ fn default_reserved_prompt_overhead() -> usize {
 }
 fn default_context_overflow_recovery() -> bool {
     true
+}
+fn default_continuation_enabled() -> bool {
+    true
+}
+fn default_max_continuations() -> usize {
+    1
+}
+fn default_continuation_timeout_ms() -> u64 {
+    120_000
 }
 
 fn default_data_dir() -> PathBuf {

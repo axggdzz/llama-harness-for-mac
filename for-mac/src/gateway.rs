@@ -3,6 +3,7 @@ use crate::{
     lifecycle::LifecyclePhase,
     process::{BackendHandle, BackendProcess},
     slot_affinity::{SlotAffinity, SlotBinding},
+    thinking,
     token_guard::{GuardError, TokenGuard, TokenGuardConfig},
 };
 use anyhow::{anyhow, Result};
@@ -50,6 +51,7 @@ struct GatewayInner {
     sleep_cancel: Arc<Notify>,
     monitor_stop: Arc<Notify>,
     request_gate: Mutex<()>,
+    thinking_mode: Mutex<thinking::ThinkingMode>,
 }
 
 #[derive(Debug, Serialize)]
@@ -73,6 +75,7 @@ struct BindingStatus {
 impl Gateway {
     pub fn new(config: AppConfig) -> Self {
         let (startup_changed, _) = watch::channel(0_u64);
+        let initial_thinking_mode = config.thinking_mode;
         let affinity = if config.slot_count > 1 {
             let path = config
                 .slot_bindings_path
@@ -96,6 +99,7 @@ impl Gateway {
                 sleep_cancel: Arc::new(Notify::new()),
                 monitor_stop: Arc::new(Notify::new()),
                 request_gate: Mutex::new(()),
+                thinking_mode: Mutex::new(initial_thinking_mode),
             }),
         }
     }
@@ -340,6 +344,8 @@ async fn proxy_inner(
         .unwrap_or("/v1");
     let url = format!("{}{}", backend.base_url(), path);
     let method = request.method().clone();
+    let is_chat_completion = method == axum::http::Method::POST
+        && request.uri().path().trim_end_matches('/') == "/v1/chat/completions";
     let headers = request.headers().clone();
     let body = match to_bytes(request.into_body(), 16 * 1024 * 1024).await {
         Ok(body) => body,
@@ -347,10 +353,16 @@ async fn proxy_inner(
     };
     let allocated_slot = allocation.as_ref().map(|item| item.slot);
     let mut body = body;
-    if allocation.is_some() || gateway.inner.config.token_guard_enabled {
+    if allocation.is_some() || gateway.inner.config.token_guard_enabled || is_chat_completion {
         if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) {
             if let Some(allocation) = allocation {
                 inject_slot_value(&mut value, allocation.slot);
+            }
+            if is_chat_completion {
+                let mut mode = gateway.inner.thinking_mode.lock().await;
+                if thinking::apply(&mut value, &mut mode) {
+                    tracing::debug!(target = "thinking", mode = ?*mode, "thinking mode applied");
+                }
             }
             if gateway.inner.config.token_guard_enabled {
                 if let Some(context_size) = gateway.inner.config.context_size {
@@ -435,7 +447,9 @@ async fn proxy_inner(
             if let Some(slot) = allocated_slot {
                 let _ = erase_backend_slot(&gateway.inner.client, &backend.base_url(), slot).await;
             }
-            match send_backend_request(&gateway.inner.client, &method, &url, &headers, body).await {
+            match send_backend_request(&gateway.inner.client, &method, &url, &headers, body.clone())
+                .await
+            {
                 Ok(retry) => retry,
                 Err(error) => {
                     return error_response(StatusCode::BAD_GATEWAY, error.to_string());
@@ -447,6 +461,29 @@ async fn proxy_inner(
     } else {
         response
     };
+
+    if gateway.inner.config.continuation_enabled && is_streaming_body(&body) {
+        let max = gateway.inner.config.max_continuations;
+        match collect_sse_with_continuation(
+            &gateway.inner.client,
+            &method,
+            &url,
+            &headers,
+            body,
+            response,
+            max,
+            gateway.inner.config.continuation_timeout_ms,
+        )
+        .await
+        {
+            Ok((status, response_headers, bytes)) => {
+                return response_from_bytes(status, &response_headers, bytes);
+            }
+            Err(error) => {
+                return error_response(StatusCode::BAD_GATEWAY, error.to_string());
+            }
+        }
+    }
 
     let mut output = Response::builder().status(response.status());
     for (name, value) in response.headers() {
@@ -462,6 +499,58 @@ async fn proxy_inner(
             response
         }
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+fn is_streaming_body(body: &axum::body::Bytes) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("stream").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
+async fn collect_sse_with_continuation(
+    client: &Client,
+    method: &axum::http::Method,
+    url: &str,
+    headers: &axum::http::HeaderMap,
+    mut body: axum::body::Bytes,
+    mut response: reqwest::Response,
+    max_continuations: usize,
+    timeout_ms: u64,
+) -> Result<(
+    reqwest::StatusCode,
+    reqwest::header::HeaderMap,
+    axum::body::Bytes,
+)> {
+    let mut output = String::new();
+    let mut accumulated = String::new();
+    let mut round = 0usize;
+    loop {
+        let status = response.status();
+        let response_headers = response.headers().clone();
+        let bytes = response.bytes().await?;
+        if !status.is_success() {
+            return Ok((status, response_headers, axum::body::Bytes::from(bytes)));
+        }
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let (content, reason, has_tool_calls) = crate::continuation::extract_sse_completion(&text);
+        accumulated.push_str(&content);
+        let should_continue =
+            reason.as_deref() == Some("length") && !has_tool_calls && round < max_continuations;
+        if !should_continue {
+            output.push_str(&text);
+            return Ok((status, response_headers, axum::body::Bytes::from(output)));
+        }
+        output.push_str(&crate::continuation::normalize_truncated_round(&text));
+        let value: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|error| anyhow!("continuation request is not valid JSON: {error}"))?;
+        let next = crate::continuation::build_continuation_body(&value, &accumulated)
+            .ok_or_else(|| anyhow!("continuation request has no messages array"))?;
+        body = axum::body::Bytes::from(serde_json::to_vec(&next)?);
+        let send = send_backend_request(client, method, url, headers, body.clone());
+        response = tokio::time::timeout(Duration::from_millis(timeout_ms.max(1)), send).await??;
+        round += 1;
     }
 }
 
@@ -516,6 +605,20 @@ fn response_from_bytes(
 ) -> Response {
     let mut output = Response::builder().status(status);
     for (name, value) in headers {
+        if matches!(
+            name.as_str(),
+            "connection"
+                | "keep-alive"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "te"
+                | "trailer"
+                | "transfer-encoding"
+                | "upgrade"
+                | "content-length"
+        ) {
+            continue;
+        }
         if let Ok(name) = HeaderName::from_bytes(name.as_str().as_bytes()) {
             if let Ok(value) = HeaderValue::from_bytes(value.as_bytes()) {
                 output = output.header(name, value);

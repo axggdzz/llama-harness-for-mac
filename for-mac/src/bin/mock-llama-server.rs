@@ -33,6 +33,9 @@ async fn main() {
     let overflow_pending = Arc::new(AtomicBool::new(
         args.iter().any(|arg| arg == "--overflow-once"),
     ));
+    let length_pending = Arc::new(AtomicBool::new(
+        args.iter().any(|arg| arg == "--length-once"),
+    ));
 
     if startup_delay_ms > 0 {
         tokio::time::sleep(Duration::from_millis(startup_delay_ms)).await;
@@ -95,6 +98,7 @@ async fn main() {
             "/v1/chat/completions",
             post(move |Json(payload): Json<Value>| {
                 let overflow_pending = overflow_pending.clone();
+                let length_pending = length_pending.clone();
                 async move {
                     if overflow_pending.swap(false, Ordering::AcqRel) {
                         return (
@@ -103,7 +107,8 @@ async fn main() {
                         )
                             .into_response();
                     }
-                    completion_response(payload, force_sse).await
+                    let length = length_pending.swap(false, Ordering::AcqRel);
+                    completion_response(payload, force_sse, length).await
                 }
             }),
         );
@@ -123,7 +128,7 @@ fn argument<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
         .map(|pair| pair[1].as_str())
 }
 
-async fn completion_response(payload: Value, force_sse: bool) -> Response {
+async fn completion_response(payload: Value, force_sse: bool, finish_length: bool) -> Response {
     let stream = force_sse
         || payload
             .get("stream")
@@ -150,15 +155,20 @@ async fn completion_response(payload: Value, force_sse: bool) -> Response {
                 "x_n_slots": payload.get("n_slots").cloned().unwrap_or(Value::Null),
                 "x_message_count": messages.len(),
                 "x_prompt_chars": prompt_chars,
+                "x_chat_template_kwargs": payload
+                    .get("chat_template_kwargs")
+                    .cloned()
+                    .unwrap_or(Value::Null),
                 "usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}
             })
             .to_string(),
         ));
     }
 
+    let finish = if finish_length { "length" } else { "stop" };
     let events: Vec<Result<String, Infallible>> = vec![
         Ok("data: {\"id\":\"mock-stream\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"mock\"},\"finish_reason\":null}]}\n\n".to_owned()),
-        Ok("data: {\"id\":\"mock-stream\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n".to_owned()),
+        Ok(format!("data: {{\"id\":\"mock-stream\",\"object\":\"chat.completion.chunk\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"{finish}\"}}]}}\n\n")),
         Ok("data: [DONE]\n\n".to_owned()),
     ];
     let mut response = Response::new(Body::from_stream(iter(events)));
