@@ -151,7 +151,7 @@ impl KvCacheManager {
             .inflight
             .remove(key);
         if let Some(notify) = notify {
-            notify.notify_waiters();
+            notify.notify_one();
         }
         result
     }
@@ -197,9 +197,9 @@ impl KvCacheManager {
             sha256: hash,
         };
         let metadata = serde_json::json!({"slot": slot, "saved_tokens": saved_tokens, "size_bytes": snapshot.size_bytes, "sha256": snapshot.sha256, "saved_at": timestamp(&snapshot.saved_at), "context_size": self.context_size});
-        tokio::fs::write(
-            self.metadata_path(key),
-            serde_json::to_vec_pretty(&metadata)?,
+        write_atomic(
+            &self.metadata_path(key),
+            &serde_json::to_vec_pretty(&metadata)?,
         )
         .await?;
         self.inner
@@ -218,6 +218,19 @@ impl KvCacheManager {
         if slot >= self.slot_count {
             return Err(anyhow!("slot {slot} is out of range"));
         }
+        loop {
+            let pending = self
+                .inner
+                .lock()
+                .expect("KV mutex poisoned")
+                .inflight
+                .get(key)
+                .cloned();
+            let Some(notify) = pending else {
+                break;
+            };
+            notify.notified().await;
+        }
         let snapshot = self
             .inner
             .lock()
@@ -235,6 +248,32 @@ impl KvCacheManager {
         {
             self.delete_snapshot(key)?;
             return Err(anyhow!("KV snapshot integrity check failed: {key}"));
+        }
+        let metadata = match std::fs::read(self.metadata_path(key))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        {
+            Some(metadata) => metadata,
+            None => {
+                self.delete_snapshot(key)?;
+                return Err(anyhow!("KV snapshot metadata missing or invalid: {key}"));
+            }
+        };
+        let metadata_slot = metadata.get("slot").and_then(|v| v.as_u64());
+        let metadata_tokens = metadata.get("saved_tokens").and_then(|v| v.as_u64());
+        let metadata_size = metadata.get("size_bytes").and_then(|v| v.as_u64());
+        let metadata_hash = metadata.get("sha256").and_then(|v| v.as_str());
+        let context_matches = self.context_size.map_or(true, |context| {
+            metadata.get("context_size").and_then(|v| v.as_u64()) == Some(context)
+        });
+        if metadata_slot != Some(snapshot.slot as u64)
+            || metadata_tokens != Some(snapshot.saved_tokens)
+            || metadata_size != Some(snapshot.size_bytes)
+            || metadata_hash != Some(snapshot.sha256.as_str())
+            || !context_matches
+        {
+            self.delete_snapshot(key)?;
+            return Err(anyhow!("KV snapshot metadata validation failed: {key}"));
         }
         let response = self
             .client
@@ -297,17 +336,28 @@ impl KvCacheManager {
     }
 
     pub async fn clear_all(&self) -> Result<usize> {
-        let keys = self
-            .snapshot()
-            .into_iter()
-            .map(|s| s.key)
-            .collect::<Vec<_>>();
         let mut deleted = 0;
-        for key in keys {
-            if self.delete_snapshot(&key)? {
-                deleted += 1;
+        if let Ok(mut entries) = tokio::fs::read_dir(&self.cache_dir).await {
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                let is_bin = path.extension().and_then(|ext| ext.to_str()) == Some("bin");
+                let is_metadata = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".meta.json"));
+                if is_bin || is_metadata {
+                    if tokio::fs::remove_file(path).await.is_ok() && is_bin {
+                        deleted += 1;
+                    }
+                }
             }
         }
+        self.inner
+            .lock()
+            .expect("KV mutex poisoned")
+            .snapshots
+            .clear();
+        self.save_index()?;
         for slot in 0..self.slot_count {
             let _ = self.erase(slot).await;
         }
@@ -407,6 +457,20 @@ fn hex_hash(bytes: &[u8]) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+async fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("snapshot path has no parent"))?;
+    tokio::fs::create_dir_all(parent).await?;
+    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    tokio::fs::write(&temp, bytes).await?;
+    if let Err(error) = tokio::fs::rename(&temp, path).await {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -571,6 +635,14 @@ mod tests {
         fs::write(manager.cache_file_path("session"), b"corrupted").unwrap();
         assert!(manager.restore(0, "session").await.is_err());
         assert!(!manager.has_snapshot("session"));
+        manager.save(0, "metadata").await.unwrap();
+        let metadata_path = manager.metadata_path("metadata");
+        let mut metadata: Value =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        metadata["sha256"] = json!("bad-hash");
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        assert!(manager.restore(0, "metadata").await.is_err());
+        assert!(!manager.has_snapshot("metadata"));
         let _ = shutdown.send(());
     }
 
