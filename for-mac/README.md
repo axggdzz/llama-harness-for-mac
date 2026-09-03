@@ -69,3 +69,12 @@ and cancellation of the sleep observation window when a new request arrives.
 Phase 3A adds SlotAffinity header recognition, stable `n_slots` routing, LRU
 eviction, preemptive/Tool locking, and atomic binding persistence. KV snapshot
 operations remain reserved for Phase 3B.
+
+## Phase 3B KV snapshots
+
+The `kv_cache::KvCacheManager` manages llama-server slot snapshots under a
+macOS Application Support-compatible cache directory. It validates file size,
+token count, metadata, and SHA-256 before restore; malformed or modified
+snapshots are rejected and removed. The manager exposes asynchronous
+`save`, `restore`, `erase`, `clear_all`, `snapshot`, and `delete_snapshot`
+operations and persists an atomic `kv_cache_index.json`.

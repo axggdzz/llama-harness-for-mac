@@ -1,5 +1,6 @@
 pub mod config;
 pub mod gateway;
+pub mod kv_cache;
 pub mod lifecycle;
 pub mod process;
 pub mod slot_affinity;

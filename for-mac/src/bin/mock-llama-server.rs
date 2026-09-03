@@ -1,13 +1,15 @@
 use axum::{
     body::Body,
-    extract::Json,
+    extract::{Json, Path, Query},
     http::{header, HeaderValue, StatusCode},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
 use serde_json::{json, Value};
-use std::{convert::Infallible, net::SocketAddr, time::Duration};
+use std::{
+    collections::HashMap, convert::Infallible, net::SocketAddr, path::PathBuf, time::Duration,
+};
 use tokio_stream::iter;
 
 #[tokio::main]
@@ -28,6 +30,41 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
         .route("/slots", get(|| async { Json(json!([])) }))
+        .route(
+            "/slots/:slot",
+            post(
+                |Path(_slot): Path<usize>,
+                 Query(query): Query<HashMap<String, String>>,
+                 body: Option<Json<Value>>| async move {
+                    let action = query.get("action").map(String::as_str).unwrap_or_default();
+                    match action {
+                        "save" => {
+                            let filename = body
+                                .and_then(|Json(value)| {
+                                    value
+                                        .get("filename")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_owned)
+                                })
+                                .unwrap_or_else(|| "mock-kv.bin".to_owned());
+                            let path = PathBuf::from(filename);
+                            if let Some(parent) = path.parent() {
+                                let _ = tokio::fs::create_dir_all(parent).await;
+                            }
+                            tokio::fs::write(path, b"mock-kv-data").await.unwrap();
+                            Json(json!({"n_saved": 3, "n_written": 12})).into_response()
+                        }
+                        "restore" => Json(json!({"status":"restored"})).into_response(),
+                        "erase" => Json(json!({"status":"erased"})).into_response(),
+                        _ => (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error":"unknown action"})),
+                        )
+                            .into_response(),
+                    }
+                },
+            ),
+        )
         .route("/props", get(|| async { Json(json!({"mock":true})) }))
         .route(
             "/metrics",
