@@ -34,3 +34,32 @@ cargo test
 ```
 
 The first milestone should use a mock llama-server so core gateway behavior can be tested without a model or Metal GPU.
+
+## Phase 1 quick start
+
+The daemon listens on `127.0.0.1:8080`. Configure a real Metal-enabled
+`llama-server` through environment variables, then run:
+
+```bash
+export LLAMA_SERVER=/absolute/path/to/llama-server
+export LLAMA_BACKEND_PORT=8081
+export LLAMA_SERVER_ARGS='--model /absolute/path/to/model.gguf --port 8081'
+cargo run
+```
+
+The first `POST /v1/chat/completions` request starts the backend and waits for
+`GET /health`. `stream: true` responses are proxied as byte-preserving SSE.
+Press `Ctrl-C` to stop the gateway and the entire Unix backend process group.
+
+For a model-free smoke test, run the mock server directly:
+
+```bash
+cargo run --bin mock-llama-server -- --port 18081 --startup-delay-ms 100
+curl http://127.0.0.1:18081/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"mock","messages":[{"role":"user","content":"hi"}]}'
+```
+
+Phase 1 intentionally does not include the dashboard UI, SlotAffinity, KV
+snapshots, TokenGuard, continuation, or crash-recovery policies; those are the
+next migration stages described in `docs/spec.md`.
