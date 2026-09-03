@@ -127,3 +127,9 @@ log tail for the dashboard. KV snapshots are listed through `GET /__kv__` and
 managed with `/__kv/save`, `/__kv/restore`, `/__kv/erase`, and `/__kv/clear`;
 requests with an existing SlotAffinity snapshot attempt an automatic restore and
 update restore-hit statistics.
+
+The gateway acquires a Unix advisory lock at `gateway.lock` in the data
+directory, so a second process exits before binding the fixed frontend port.
+SSE forwarding is event-incremental (including LF/CRLF and comment keep-alives);
+length-terminated rounds are continued without buffering already forwarded
+events.

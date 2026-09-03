@@ -18,7 +18,7 @@ use axum::{
     routing::{any, get, post},
     Json, Router,
 };
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -737,7 +737,9 @@ async fn proxy_inner(
 
     if gateway.inner.config.continuation_enabled && is_streaming_body(&body) {
         let max = gateway.inner.config.max_continuations;
-        match collect_sse_with_continuation(
+        let status = response.status();
+        let response_headers = response.headers().clone();
+        let stream = stream_sse_with_continuation(
             &gateway.inner.client,
             &method,
             &url,
@@ -748,16 +750,19 @@ async fn proxy_inner(
             gateway.inner.config.continuation_timeout_ms,
             continuation_token_config(&gateway.inner.config),
             backend.base_url(),
-        )
-        .await
-        {
-            Ok((status, response_headers, bytes)) => {
-                return response_from_bytes(status, &response_headers, bytes);
-            }
-            Err(error) => {
-                return error_response(StatusCode::BAD_GATEWAY, error.to_string());
+        );
+        let mut output = Response::builder().status(status);
+        for (name, value) in &response_headers {
+            if !is_hop_by_hop(name) {
+                output = output.header(name, value);
             }
         }
+        let stream = RequestStream::new(stream, lease.clone());
+        lease.handoff();
+        return match output.body(Body::from_stream(stream)) {
+            Ok(response) => response,
+            Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        };
     }
 
     if gateway.inner.config.continuation_enabled && !is_streaming_body(&body) {
@@ -777,6 +782,7 @@ async fn proxy_inner(
         .await
         {
             Ok((status, response_headers, bytes)) => {
+                record_json_usage(&gateway.inner.stats, &bytes);
                 return response_from_bytes(status, &response_headers, bytes);
             }
             Err(error) => return error_response(StatusCode::BAD_GATEWAY, error.to_string()),
@@ -807,6 +813,90 @@ fn is_streaming_body(body: &axum::body::Bytes) -> bool {
         .unwrap_or(false)
 }
 
+fn stream_sse_with_continuation(
+    client: &Client,
+    method: &axum::http::Method,
+    url: &str,
+    headers: &axum::http::HeaderMap,
+    body: axum::body::Bytes,
+    response: reqwest::Response,
+    max_continuations: usize,
+    timeout_ms: u64,
+    token_config: Option<TokenGuardConfig>,
+    backend_base_url: String,
+) -> impl Stream<Item = Result<axum::body::Bytes>> + 'static {
+    let client = client.clone();
+    let method = method.clone();
+    let url = url.to_owned();
+    let headers = headers.clone();
+    async_stream::try_stream! {
+        let mut current_body = body;
+        let mut response = response;
+        let mut accumulated = String::new();
+        for round in 0..=max_continuations {
+            let status = response.status();
+            let mut incoming = response.bytes_stream();
+            let mut pending = Vec::new();
+            let mut continue_round = false;
+            while let Some(chunk) = incoming.next().await {
+                pending.extend_from_slice(&chunk?);
+                loop {
+                    let Some((end, delimiter_len)) = find_sse_delimiter(&pending) else { break; };
+                    let event = pending.drain(..end).collect::<Vec<_>>();
+                    pending.drain(..delimiter_len);
+                    let text = String::from_utf8_lossy(&event).to_string();
+                    let (content, reason, has_tool_calls) = crate::continuation::extract_sse_completion(&text);
+                    accumulated.push_str(&content);
+                    if status.is_success() && reason.as_deref() == Some("length") && !has_tool_calls && round < max_continuations {
+                        continue_round = true;
+                        pending.clear();
+                        break;
+                    }
+                    let mut output = event;
+                    output.extend_from_slice(b"\n\n");
+                    yield axum::body::Bytes::from(output);
+                }
+                if continue_round { break; }
+            }
+            if !status.is_success() {
+                if !pending.is_empty() { yield axum::body::Bytes::from(pending); }
+                break;
+            }
+            if !continue_round {
+                if !pending.is_empty() { yield axum::body::Bytes::from(pending); }
+                break;
+            }
+            let value: serde_json::Value = serde_json::from_slice(&current_body)
+                .map_err(|error| anyhow!("continuation request is not valid JSON: {error}"))?;
+            let mut next = crate::continuation::build_continuation_body(&value, &accumulated)
+                .ok_or_else(|| anyhow!("continuation request has no messages array"))?;
+            if let Some(token_config) = &token_config {
+                TokenGuard::guard(token_config, &mut next, |text| {
+                    let client = client.clone();
+                    let base_url = backend_base_url.clone();
+                    async move { TokenGuard::count_tokens(&client, &base_url, &text).await }
+                }).await?;
+            }
+            current_body = axum::body::Bytes::from(serde_json::to_vec(&next)?);
+            response = tokio::time::timeout(
+                Duration::from_millis(timeout_ms.max(1)),
+                send_backend_request(&client, &method, &url, &headers, current_body.clone()),
+            ).await??;
+        }
+    }
+}
+
+fn find_sse_delimiter(bytes: &[u8]) -> Option<(usize, usize)> {
+    if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+        return Some((position, 4));
+    }
+    bytes
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|position| (position, 2))
+}
+
+#[allow(dead_code)]
 async fn collect_sse_with_continuation(
     client: &Client,
     method: &axum::http::Method,
@@ -932,6 +1022,24 @@ async fn collect_json_with_continuation(
 
 fn body_value(body: &axum::body::Bytes) -> Result<serde_json::Value> {
     Ok(serde_json::from_slice(body)?)
+}
+
+fn record_json_usage(stats: &Stats, bytes: &[u8]) {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return;
+    };
+    let Some(usage) = value.get("usage") else {
+        return;
+    };
+    let prompt = usage
+        .get("prompt_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let completion = usage
+        .get("completion_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    stats.record_tokens(prompt, completion, completion);
 }
 
 fn continuation_token_config(config: &AppConfig) -> Option<TokenGuardConfig> {

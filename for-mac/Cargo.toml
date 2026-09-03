@@ -7,7 +7,9 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1.0"
+async-stream = "0.3"
 axum = "0.7"
+fs2 = "0.4"
 directories = "5.0"
 futures-util = "0.3"
 http-body-util = "0.1"

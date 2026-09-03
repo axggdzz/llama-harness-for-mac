@@ -1,6 +1,6 @@
 //! LlamaHarness macOS port entry point.
 
-use llama_harness_mac::{config::AppConfig, gateway::Gateway};
+use llama_harness_mac::{config::AppConfig, gateway::Gateway, instance::InstanceLock};
 use std::{path::PathBuf, sync::Arc};
 
 #[tokio::main]
@@ -10,6 +10,7 @@ async fn main() -> anyhow::Result<()> {
     if let Ok(saved) = AppConfig::load_from(config.config_path()) {
         config = saved;
     }
+    let _instance_lock = InstanceLock::acquire(config.data_dir.join("gateway.lock"))?;
     if let Ok(executable) = std::env::var("LLAMA_SERVER") {
         config.backend_executable = Some(PathBuf::from(executable));
     }

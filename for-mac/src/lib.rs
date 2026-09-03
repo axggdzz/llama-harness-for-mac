@@ -1,6 +1,7 @@
 pub mod config;
 pub mod continuation;
 pub mod gateway;
+pub mod instance;
 pub mod kv_cache;
 pub mod lifecycle;
 pub mod observability;

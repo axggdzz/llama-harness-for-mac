@@ -113,6 +113,8 @@ async fn gateway_starts_backend_for_json_and_streaming_requests() {
         .await
         .unwrap();
     assert!(stats["requests"].as_u64().unwrap() >= 3);
+    assert!(stats["prompt_tokens"].as_u64().unwrap() >= 1);
+    assert!(stats["completion_tokens"].as_u64().unwrap() >= 2);
     let logs = client
         .get(format!("{base}/__logs__?kind=main&max_bytes=4096"))
         .send()
