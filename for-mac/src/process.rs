@@ -188,19 +188,18 @@ impl BackendProcess {
         if !is_llama_server_binary(&config.executable) {
             return config.args.clone();
         }
-        let help = timeout(
-            Duration::from_secs(2),
-            Command::new(&config.executable).arg("--help").output(),
-        )
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .map(|output| {
-            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            text
-        })
-        .unwrap_or_default();
+        let mut probe = Command::new(&config.executable);
+        probe.arg("--help").kill_on_drop(true);
+        let help = timeout(Duration::from_secs(2), probe.output())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map(|output| {
+                let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+                text.push_str(&String::from_utf8_lossy(&output.stderr));
+                text
+            })
+            .unwrap_or_default();
         filter_arguments_from_help(&config.args, &help)
     }
 }
