@@ -36,6 +36,15 @@ async fn main() {
     let length_pending = Arc::new(AtomicBool::new(
         args.iter().any(|arg| arg == "--length-once"),
     ));
+    let oom_pending = Arc::new(AtomicBool::new(args.iter().any(|arg| arg == "--oom-once")));
+    let oom_marker = argument(&args, "--oom-marker").map(PathBuf::from);
+    if let Some(marker) = &oom_marker {
+        if marker.exists() {
+            oom_pending.store(false, Ordering::Release);
+        } else {
+            oom_pending.store(true, Ordering::Release);
+        }
+    }
 
     if startup_delay_ms > 0 {
         tokio::time::sleep(Duration::from_millis(startup_delay_ms)).await;
@@ -99,7 +108,19 @@ async fn main() {
             post(move |Json(payload): Json<Value>| {
                 let overflow_pending = overflow_pending.clone();
                 let length_pending = length_pending.clone();
+                let oom_pending = oom_pending.clone();
+                let oom_marker = oom_marker.clone();
                 async move {
+                    if oom_pending.swap(false, Ordering::AcqRel) {
+                        if let Some(marker) = oom_marker {
+                            let _ = std::fs::write(marker, b"oom");
+                        }
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({"error":{"message":"std::bad_alloc: out of memory"}})),
+                        )
+                            .into_response();
+                    }
                     if overflow_pending.swap(false, Ordering::AcqRel) {
                         return (
                             StatusCode::BAD_REQUEST,

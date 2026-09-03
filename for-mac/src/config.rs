@@ -45,6 +45,10 @@ pub struct AppConfig {
     pub max_continuations: usize,
     #[serde(default = "default_continuation_timeout_ms")]
     pub continuation_timeout_ms: u64,
+    #[serde(default = "default_crash_recovery_enabled")]
+    pub crash_recovery_enabled: bool,
+    #[serde(default = "default_max_crash_count")]
+    pub max_crash_count: usize,
     #[serde(default)]
     pub slot_bindings_path: Option<PathBuf>,
     #[serde(default)]
@@ -86,6 +90,8 @@ impl Default for AppConfig {
             continuation_enabled: default_continuation_enabled(),
             max_continuations: default_max_continuations(),
             continuation_timeout_ms: default_continuation_timeout_ms(),
+            crash_recovery_enabled: default_crash_recovery_enabled(),
+            max_crash_count: default_max_crash_count(),
             slot_bindings_path: None,
             auto_preemptive_prefixes: Vec::new(),
             data_dir: default_data_dir(),
@@ -149,6 +155,12 @@ fn default_max_continuations() -> usize {
 }
 fn default_continuation_timeout_ms() -> u64 {
     120_000
+}
+fn default_crash_recovery_enabled() -> bool {
+    true
+}
+fn default_max_crash_count() -> usize {
+    3
 }
 
 fn default_data_dir() -> PathBuf {

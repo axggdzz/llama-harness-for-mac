@@ -171,3 +171,40 @@ async fn gateway_applies_thinking_mode_command_and_fields() {
     let _ = shutdown.send(());
     task.await.unwrap();
 }
+
+#[tokio::test]
+async fn gateway_ejects_oom_backend_and_next_request_restarts_it() {
+    let backend_port = backend_port().await;
+    let mut config = config(backend_port, 10_000);
+    config.token_guard_enabled = false;
+    let marker_dir = tempfile::tempdir().unwrap();
+    config.backend_args.extend([
+        "--oom-marker".into(),
+        marker_dir
+            .path()
+            .join("oom.marker")
+            .to_string_lossy()
+            .into_owned(),
+    ]);
+    let (gateway, base, shutdown, task) = start(config).await;
+    let client = Client::new();
+    let payload =
+        serde_json::json!({"model":"mock", "messages":[{"role":"user", "content":"hello"}]});
+    let first = client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 503);
+    assert!(gateway.backend_pid().await.is_none());
+    let second = client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 200);
+    let _ = shutdown.send(());
+    task.await.unwrap();
+}

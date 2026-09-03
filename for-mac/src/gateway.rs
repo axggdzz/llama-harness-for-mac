@@ -52,6 +52,7 @@ struct GatewayInner {
     monitor_stop: Arc<Notify>,
     request_gate: Mutex<()>,
     thinking_mode: Mutex<thinking::ThinkingMode>,
+    crash_count: AtomicUsize,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,6 +101,7 @@ impl Gateway {
                 monitor_stop: Arc::new(Notify::new()),
                 request_gate: Mutex::new(()),
                 thinking_mode: Mutex::new(initial_thinking_mode),
+                crash_count: AtomicUsize::new(0),
             }),
         }
     }
@@ -326,6 +328,15 @@ async fn proxy_inner(
     request: Request<Body>,
     lease: Arc<RequestLease>,
 ) -> Response {
+    if gateway.inner.config.crash_recovery_enabled
+        && gateway.inner.crash_count.load(Ordering::Acquire)
+            >= gateway.inner.config.max_crash_count.max(1)
+    {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backend recovery circuit breaker is open".to_owned(),
+        );
+    }
     let allocation = gateway.inner.affinity.as_ref().map(|affinity| {
         affinity.allocate(
             request.headers(),
@@ -462,6 +473,34 @@ async fn proxy_inner(
         response
     };
 
+    if gateway.inner.config.crash_recovery_enabled && response.status().is_server_error() {
+        let response_headers = response.headers().clone();
+        let status = response.status();
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(error) => return error_response(StatusCode::BAD_GATEWAY, error.to_string()),
+        };
+        if is_oom_response(&bytes) {
+            let crashes = gateway.inner.crash_count.fetch_add(1, Ordering::AcqRel) + 1;
+            tracing::error!(
+                target = "recovery",
+                crashes,
+                "backend OOM/bad_alloc detected; stopping backend"
+            );
+            let backend = gateway.inner.backend.lock().await.take();
+            *gateway.inner.phase.write().await = LifecyclePhase::Standby;
+            if let Some(backend) = backend {
+                let _ = backend.stop().await;
+            }
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("backend out of memory; recovery attempt recorded ({crashes})"),
+            );
+        }
+        return response_from_bytes(status, &response_headers, bytes);
+    }
+    gateway.inner.crash_count.store(0, Ordering::Release);
+
     if gateway.inner.config.continuation_enabled && is_streaming_body(&body) {
         let max = gateway.inner.config.max_continuations;
         match collect_sse_with_continuation(
@@ -596,6 +635,13 @@ fn is_context_overflow(body: &[u8]) -> bool {
     ]
     .iter()
     .any(|needle| text.contains(needle))
+}
+
+fn is_oom_response(body: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(body).to_ascii_lowercase();
+    ["bad_alloc", "bad allocation", "out of memory", "oom"]
+        .iter()
+        .any(|needle| text.contains(needle))
 }
 
 fn response_from_bytes(

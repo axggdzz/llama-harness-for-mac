@@ -101,3 +101,8 @@ completions and one-shot SSE continuation when a stream ends with
 `finish_reason=length`. Configure `continuation_enabled`,
 `max_continuations`, and `continuation_timeout_ms`; tool-call streams are
 passed through without continuation.
+
+Phase 4D adds bad_alloc/OOM recovery. Configure `crash_recovery_enabled` and
+`max_crash_count`; recognized OOM responses stop the backend process group and
+return 503, while a later request can restart it. The recovery circuit breaker
+prevents repeated restart loops.
