@@ -10,5 +10,8 @@
 `GET /__capabilities__` 继续通过 `/props`、`/slots`、`/metrics` 和 `/v1/tokenize` 返回运行时
 能力，供 UI 展示和后续功能降级使用。
 
+后端 stderr 由进程管理器保留最多 64 KiB 尾部，并同步写入 `errors.log`；网关通过
+`GET /__logs__?kind=backend&max_bytes=...` 提供受限读取。OOM 关键字仍会触发既有恢复和熔断流程。
+
 验证：`cargo fmt --check`、`cargo check`、`cargo test` 全部通过；能力过滤、空帮助回退、精确
 二进制识别和网关端到端流程均有测试覆盖。
