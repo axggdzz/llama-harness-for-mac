@@ -133,6 +133,9 @@ an `.app`; `npm run build:dmg` requires a functional macOS `hdiutil`). Real
 Metal/GGUF smoke testing, signing, notarization, and DMG validation remain
 machine-specific release checks.
 
+Run `scripts/verify.sh` from `for-mac/` for the complete local verification
+sequence (Rust plus UI syntax and `.app` bundle).
+
 ## Gateway controls and dashboard wiring
 
 `GET /__config__` reads the active configuration and `PUT /__config__` validates
