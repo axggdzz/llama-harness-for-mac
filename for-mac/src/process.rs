@@ -23,6 +23,63 @@ pub struct BackendCapabilities {
     pub tokenize: bool,
 }
 
+fn filter_arguments_from_help(args: &[String], help: &str) -> Vec<String> {
+    if help.trim().is_empty() {
+        return args.to_vec();
+    }
+    let supported = help
+        .split_whitespace()
+        .filter_map(|token| token.strip_prefix("--"))
+        .map(|token| {
+            format!(
+                "--{}",
+                token
+                    .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-')
+                    .split('=')
+                    .next()
+                    .unwrap_or(token)
+            )
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let mut filtered = Vec::with_capacity(args.len());
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
+        if !argument.starts_with("--") {
+            filtered.push(argument.clone());
+            index += 1;
+            continue;
+        }
+        let name = argument.split('=').next().unwrap_or(argument);
+        if supported.contains(name) {
+            filtered.push(argument.clone());
+            if !argument.contains('=')
+                && args
+                    .get(index + 1)
+                    .is_some_and(|next| !next.starts_with("--"))
+            {
+                filtered.push(args[index + 1].clone());
+                index += 1;
+            }
+        } else if !argument.contains('=')
+            && args
+                .get(index + 1)
+                .is_some_and(|next| !next.starts_with("--"))
+        {
+            index += 1;
+        }
+        index += 1;
+    }
+    filtered
+}
+
+fn is_llama_server_binary(path: &std::path::Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("llama-server" | "llama-server.exe")
+    )
+}
+
 pub struct BackendHandle {
     child: Arc<Mutex<Option<Child>>>,
     config: BackendConfig,
@@ -36,9 +93,10 @@ impl BackendProcess {
     }
 
     pub async fn start(config: BackendConfig) -> Result<BackendHandle> {
+        let args = Self::detected_arguments(&config).await;
         let mut command = Command::new(&config.executable);
         command
-            .args(Self::command_arguments(&config))
+            .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -86,6 +144,26 @@ impl BackendProcess {
             client: Client::new(),
             oom_evidence,
         })
+    }
+
+    async fn detected_arguments(config: &BackendConfig) -> Vec<String> {
+        if !is_llama_server_binary(&config.executable) {
+            return config.args.clone();
+        }
+        let help = timeout(
+            Duration::from_secs(2),
+            Command::new(&config.executable).arg("--help").output(),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .map(|output| {
+            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            text
+        })
+        .unwrap_or_default();
+        filter_arguments_from_help(&config.args, &help)
     }
 }
 
@@ -227,5 +305,37 @@ mod tests {
         };
 
         assert_eq!(BackendProcess::command_arguments(&config), config.args);
+    }
+
+    #[test]
+    fn unsupported_help_flags_are_dropped_with_their_values() {
+        let args = vec![
+            "--model".into(),
+            "model path.gguf".into(),
+            "--flash-attn".into(),
+            "--ctx-size".into(),
+            "4096".into(),
+        ];
+        let help = "Usage: llama-server --model FILE --ctx-size N";
+        assert_eq!(
+            super::filter_arguments_from_help(&args, help),
+            vec!["--model", "model path.gguf", "--ctx-size", "4096"]
+        );
+    }
+
+    #[test]
+    fn empty_help_keeps_all_arguments_for_safe_fallback() {
+        let args = vec!["--custom-flag".into(), "value".into()];
+        assert_eq!(super::filter_arguments_from_help(&args, ""), args);
+    }
+
+    #[test]
+    fn capability_probe_only_targets_real_llama_server_binary() {
+        assert!(super::is_llama_server_binary(std::path::Path::new(
+            "/opt/llama-server"
+        )));
+        assert!(!super::is_llama_server_binary(std::path::Path::new(
+            "mock-llama-server"
+        )));
     }
 }
