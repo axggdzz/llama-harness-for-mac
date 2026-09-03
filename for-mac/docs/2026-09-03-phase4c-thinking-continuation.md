@@ -8,6 +8,6 @@
 
 ## SSE 续接
 
-启用 `continuation_enabled` 后，网关收集流式响应的一轮 SSE。若最后 chunk 的 `finish_reason` 为 `length`，且没有 `tool_calls`，网关会把已生成文本作为 assistant 消息并追加续接指令，最多按 `max_continuations` 再请求一次。续接期间不向客户端发送 `[DONE]`，末轮的 SSE 原样结束；中间轮的 length 被归一化为 `null`。
+启用 `continuation_enabled` 后，网关处理流式和非流式响应。流式响应若最后 chunk 的 `finish_reason` 为 `length`，且没有 `tool_calls`，网关会把已生成文本作为 assistant 消息并追加续接指令，最多按 `max_continuations` 再请求一次。续接期间不向客户端发送 `[DONE]`，末轮的 SSE 原样结束；中间轮的 length 被归一化为 `null`。非流式 JSON 采用相同的 assistant 回填和续接指令，最终响应保留 JSON 结构并将完成原因归一化为 `stop`。
 
-续接请求受 `continuation_timeout_ms` 限制。达到上限、检测到工具调用或后端续接失败时，网关不循环重试，保留已收到的 SSE 内容。`Off` 思考模式、非 chat 路径和非流式响应不受 SSE 续接改写影响。
+续接请求受 `continuation_timeout_ms` 限制，并重新经过 TokenGuard（若启用）。达到上限、检测到工具调用或后端续接失败时，网关不循环重试，保留已收到的内容。`Off` 思考模式和非 chat 路径不受续接改写影响。

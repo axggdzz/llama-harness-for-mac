@@ -480,7 +480,7 @@ async fn proxy_inner(
             Ok(bytes) => bytes,
             Err(error) => return error_response(StatusCode::BAD_GATEWAY, error.to_string()),
         };
-        if is_oom_response(&bytes) {
+        if is_oom_response(&bytes) || backend.has_oom_evidence() {
             let crashes = gateway.inner.crash_count.fetch_add(1, Ordering::AcqRel) + 1;
             tracing::error!(
                 target = "recovery",
@@ -512,6 +512,8 @@ async fn proxy_inner(
             response,
             max,
             gateway.inner.config.continuation_timeout_ms,
+            continuation_token_config(&gateway.inner.config),
+            backend.base_url(),
         )
         .await
         {
@@ -521,6 +523,29 @@ async fn proxy_inner(
             Err(error) => {
                 return error_response(StatusCode::BAD_GATEWAY, error.to_string());
             }
+        }
+    }
+
+    if gateway.inner.config.continuation_enabled && !is_streaming_body(&body) {
+        let max = gateway.inner.config.max_continuations;
+        match collect_json_with_continuation(
+            &gateway.inner.client,
+            &method,
+            &url,
+            &headers,
+            body,
+            response,
+            max,
+            gateway.inner.config.continuation_timeout_ms,
+            continuation_token_config(&gateway.inner.config),
+            backend.base_url(),
+        )
+        .await
+        {
+            Ok((status, response_headers, bytes)) => {
+                return response_from_bytes(status, &response_headers, bytes);
+            }
+            Err(error) => return error_response(StatusCode::BAD_GATEWAY, error.to_string()),
         }
     }
 
@@ -557,6 +582,8 @@ async fn collect_sse_with_continuation(
     mut response: reqwest::Response,
     max_continuations: usize,
     timeout_ms: u64,
+    token_config: Option<TokenGuardConfig>,
+    backend_base_url: String,
 ) -> Result<(
     reqwest::StatusCode,
     reqwest::header::HeaderMap,
@@ -586,11 +613,104 @@ async fn collect_sse_with_continuation(
             .map_err(|error| anyhow!("continuation request is not valid JSON: {error}"))?;
         let next = crate::continuation::build_continuation_body(&value, &accumulated)
             .ok_or_else(|| anyhow!("continuation request has no messages array"))?;
+        let mut next = next;
+        if let Some(token_config) = &token_config {
+            TokenGuard::guard(token_config, &mut next, |text| {
+                let base_url = &backend_base_url;
+                async move { TokenGuard::count_tokens(client, base_url, &text).await }
+            })
+            .await?;
+        }
         body = axum::body::Bytes::from(serde_json::to_vec(&next)?);
         let send = send_backend_request(client, method, url, headers, body.clone());
         response = tokio::time::timeout(Duration::from_millis(timeout_ms.max(1)), send).await??;
         round += 1;
     }
+}
+
+async fn collect_json_with_continuation(
+    client: &Client,
+    method: &axum::http::Method,
+    url: &str,
+    headers: &axum::http::HeaderMap,
+    mut body: axum::body::Bytes,
+    mut response: reqwest::Response,
+    max_continuations: usize,
+    timeout_ms: u64,
+    token_config: Option<TokenGuardConfig>,
+    backend_base_url: String,
+) -> Result<(
+    reqwest::StatusCode,
+    reqwest::header::HeaderMap,
+    axum::body::Bytes,
+)> {
+    for round in 0..=max_continuations {
+        let status = response.status();
+        let response_headers = response.headers().clone();
+        let bytes = response.bytes().await?;
+        if !status.is_success() {
+            return Ok((status, response_headers, axum::body::Bytes::from(bytes)));
+        }
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|error| anyhow!("backend JSON response is invalid: {error}"))?;
+        let choice = value
+            .get("choices")
+            .and_then(|v| v.as_array())
+            .and_then(|v| v.first());
+        let reason = choice
+            .and_then(|v| v.get("finish_reason"))
+            .and_then(serde_json::Value::as_str);
+        let tool_calls = choice
+            .and_then(|v| v.get("message"))
+            .and_then(|v| v.get("tool_calls"))
+            .is_some();
+        if reason != Some("length") || tool_calls || round == max_continuations {
+            return Ok((
+                status,
+                response_headers,
+                axum::body::Bytes::from(serde_json::to_vec(&value)?),
+            ));
+        }
+        let content = choice
+            .and_then(|v| v.get("message"))
+            .and_then(|v| v.get("content"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let next = crate::continuation::build_continuation_body(&body_value(&body)?, content)
+            .ok_or_else(|| anyhow!("continuation request has no messages array"))?;
+        let mut next = next;
+        if let Some(token_config) = &token_config {
+            TokenGuard::guard(token_config, &mut next, |text| {
+                let base_url = &backend_base_url;
+                async move { TokenGuard::count_tokens(client, base_url, &text).await }
+            })
+            .await?;
+        }
+        body = axum::body::Bytes::from(serde_json::to_vec(&next)?);
+        response = tokio::time::timeout(
+            Duration::from_millis(timeout_ms.max(1)),
+            send_backend_request(client, method, url, headers, body.clone()),
+        )
+        .await??;
+    }
+    unreachable!()
+}
+
+fn body_value(body: &axum::body::Bytes) -> Result<serde_json::Value> {
+    Ok(serde_json::from_slice(body)?)
+}
+
+fn continuation_token_config(config: &AppConfig) -> Option<TokenGuardConfig> {
+    config
+        .context_size
+        .map(|context_size| TokenGuardConfig {
+            context_size,
+            slot_count: config.slot_count,
+            reserved_output_tokens: config.reserved_output_tokens,
+            reserved_prompt_overhead: config.reserved_prompt_overhead,
+            enabled: config.token_guard_enabled,
+        })
+        .filter(|config| config.enabled)
 }
 
 async fn send_backend_request(

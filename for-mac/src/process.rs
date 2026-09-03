@@ -2,7 +2,10 @@ use crate::config::BackendConfig;
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
@@ -15,6 +18,7 @@ pub struct BackendHandle {
     child: Arc<Mutex<Option<Child>>>,
     config: BackendConfig,
     client: Client,
+    oom_evidence: Arc<AtomicBool>,
 }
 
 impl BackendProcess {
@@ -51,10 +55,19 @@ impl BackendProcess {
                 let _ = stdout.read_to_end(&mut sink).await;
             });
         }
+        let oom_evidence = Arc::new(AtomicBool::new(false));
         if let Some(mut stderr) = child.stderr.take() {
+            let oom_evidence = oom_evidence.clone();
             tokio::spawn(async move {
                 let mut sink = Vec::new();
                 let _ = stderr.read_to_end(&mut sink).await;
+                let text = String::from_utf8_lossy(&sink).to_ascii_lowercase();
+                if ["bad_alloc", "bad allocation", "out of memory", "oom"]
+                    .iter()
+                    .any(|needle| text.contains(needle))
+                {
+                    oom_evidence.store(true, Ordering::Release);
+                }
             });
         }
 
@@ -62,6 +75,7 @@ impl BackendProcess {
             child: Arc::new(Mutex::new(Some(child))),
             config,
             client: Client::new(),
+            oom_evidence,
         })
     }
 }
@@ -76,6 +90,10 @@ impl BackendHandle {
 
     pub fn base_url(&self) -> String {
         format!("http://{}:{}", self.config.host, self.config.port)
+    }
+
+    pub fn has_oom_evidence(&self) -> bool {
+        self.oom_evidence.load(Ordering::Acquire)
     }
 
     pub async fn is_running(&self) -> bool {

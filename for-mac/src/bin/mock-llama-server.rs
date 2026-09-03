@@ -172,7 +172,7 @@ async fn completion_response(payload: Value, force_sse: bool, finish_length: boo
                 "object":"chat.completion",
                 "created":0,
                 "model":payload.get("model").and_then(Value::as_str).unwrap_or("mock"),
-                "choices":[{"index":0,"message":{"role":"assistant","content":"mock response"},"finish_reason":"stop"}],
+                "choices":[{"index":0,"message":{"role":"assistant","content":"mock response"},"finish_reason":if finish_length {"length"} else {"stop"}}],
                 "x_n_slots": payload.get("n_slots").cloned().unwrap_or(Value::Null),
                 "x_message_count": messages.len(),
                 "x_prompt_chars": prompt_chars,

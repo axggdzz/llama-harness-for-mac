@@ -76,8 +76,6 @@ pub fn build_continuation_body(
     let messages = next.get_mut("messages")?.as_array_mut()?;
     messages.push(serde_json::json!({"role":"assistant","content":accumulated}));
     messages.push(serde_json::json!({"role":"user","content":"请继续输出，不要重复已有内容，延续上文逻辑完成剩余内容"}));
-    next.as_object_mut()?
-        .insert("stream".into(), serde_json::json!(true));
     Some(next)
 }
 

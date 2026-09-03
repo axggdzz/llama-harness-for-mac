@@ -208,3 +208,25 @@ async fn gateway_ejects_oom_backend_and_next_request_restarts_it() {
     let _ = shutdown.send(());
     task.await.unwrap();
 }
+
+#[tokio::test]
+async fn gateway_continues_non_stream_length_response() {
+    let backend_port = backend_port().await;
+    let mut config = config(backend_port, 10_000);
+    config.token_guard_enabled = false;
+    config.backend_args.push("--length-once".into());
+    config.max_continuations = 1;
+    let (_gateway, base, shutdown, task) = start(config).await;
+    let client = Client::new();
+    let response = client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&serde_json::json!({"model":"mock", "messages":[{"role":"user", "content":"hello"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = response.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(body["choices"][0]["finish_reason"], "stop");
+    let _ = shutdown.send(());
+    task.await.unwrap();
+}
