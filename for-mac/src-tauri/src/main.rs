@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use llama_harness_mac::{config::AppConfig, gateway::Gateway, instance::InstanceLock};
+use llama_harness_mac::{config::{parse_backend_args, AppConfig}, gateway::Gateway, instance::InstanceLock};
 use std::{path::PathBuf, sync::Arc};
 use tauri::{Manager, RunEvent};
 use tokio::sync::oneshot;
@@ -19,7 +19,7 @@ fn main() {
         }
     }
     if let Ok(args) = std::env::var("LLAMA_SERVER_ARGS") {
-        config.backend_args = args.split_whitespace().map(str::to_owned).collect();
+        config.backend_args = parse_backend_args(&args);
     }
     let _instance_lock = match InstanceLock::acquire(config.data_dir.join("gateway.lock")) {
         Ok(lock) => lock,

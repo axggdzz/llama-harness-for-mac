@@ -77,6 +77,11 @@ pub struct BackendConfig {
     pub ready_poll_ms: u64,
 }
 
+pub fn parse_backend_args(raw: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(raw)
+        .unwrap_or_else(|_| raw.split_whitespace().map(str::to_owned).collect())
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -143,6 +148,9 @@ impl AppConfig {
         }
         if self.backend_port == 0 {
             return Err(anyhow!("backend_port must be non-zero"));
+        }
+        if self.backend_host.trim().is_empty() {
+            return Err(anyhow!("backend_host must not be empty"));
         }
         if self.slot_count == 0 {
             return Err(anyhow!("slot_count must be greater than zero"));
@@ -247,5 +255,13 @@ mod tests {
         assert_eq!(loaded.backend_port, 9123);
         config.gateway_port = 0;
         assert!(config.save_to(&path).is_err());
+    }
+
+    #[test]
+    fn backend_args_json_preserves_spaces() {
+        assert_eq!(
+            super::parse_backend_args(r#"["--model","model path.gguf","--ctx-size","4096"]"#),
+            vec!["--model", "model path.gguf", "--ctx-size", "4096"]
+        );
     }
 }
