@@ -28,6 +28,29 @@ async fn process_manager_waits_for_readiness_and_stops_group() {
 }
 
 #[tokio::test]
+async fn process_manager_keeps_bounded_backend_stderr_tail() {
+    let config = BackendConfig {
+        executable: PathBuf::from(env!("CARGO_BIN_EXE_mock-llama-server")),
+        args: vec![
+            "--port".into(),
+            "18082".into(),
+            "--stderr-line".into(),
+            "backend diagnostic".into(),
+        ],
+        host: "127.0.0.1".into(),
+        port: 18082,
+        ready_timeout_ms: 5_000,
+        ready_poll_ms: 20,
+    };
+    let handle = BackendProcess::start(config).await.unwrap();
+    handle.wait_ready().await.unwrap();
+    sleep(Duration::from_millis(30)).await;
+    let tail = handle.stderr_tail(1024).await;
+    assert!(tail.contains("backend diagnostic"));
+    handle.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn readiness_reports_an_early_backend_exit() {
     let config = BackendConfig {
         executable: PathBuf::from("/usr/bin/true"),

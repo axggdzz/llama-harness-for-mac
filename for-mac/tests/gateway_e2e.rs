@@ -15,6 +15,8 @@ async fn gateway_starts_backend_for_json_and_streaming_requests() {
         "18082".into(),
         "--startup-delay-ms".into(),
         "100".into(),
+        "--stderr-line".into(),
+        "gateway backend diagnostic".into(),
     ];
     config.backend_port = 18082;
     config.ready_timeout_ms = 5_000;
@@ -124,6 +126,15 @@ async fn gateway_starts_backend_for_json_and_streaming_requests() {
         .await
         .unwrap();
     assert!(logs.contains("request POST /v1/chat/completions"));
+    let backend_logs = client
+        .get(format!("{base}/__logs__?kind=backend&max_bytes=4096"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(backend_logs.contains("gateway backend diagnostic"));
     let snapshots = client
         .get(format!("{base}/__kv__"))
         .send()

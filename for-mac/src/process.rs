@@ -2,6 +2,7 @@ use crate::config::BackendConfig;
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::process::Stdio;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -85,6 +86,7 @@ pub struct BackendHandle {
     config: BackendConfig,
     client: Client,
     oom_evidence: Arc<AtomicBool>,
+    stderr_tail: Arc<Mutex<VecDeque<u8>>>,
 }
 
 impl BackendProcess {
@@ -93,7 +95,24 @@ impl BackendProcess {
     }
 
     pub async fn start(config: BackendConfig) -> Result<BackendHandle> {
+        Self::start_with_logger(config, None).await
+    }
+
+    pub async fn start_with_logger(
+        config: BackendConfig,
+        logger: Option<Arc<crate::observability::RotatingLogger>>,
+    ) -> Result<BackendHandle> {
         let args = Self::detected_arguments(&config).await;
+        if args != config.args {
+            let message = format!(
+                "backend capability probe removed unsupported arguments for {}",
+                config.executable.display()
+            );
+            tracing::warn!(target = "backend", "{message}");
+            if let Some(logger) = &logger {
+                let _ = logger.write(crate::observability::LogKind::Main, &message);
+            }
+        }
         let mut command = Command::new(&config.executable);
         command
             .args(args)
@@ -123,17 +142,35 @@ impl BackendProcess {
             });
         }
         let oom_evidence = Arc::new(AtomicBool::new(false));
+        let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(64 * 1024)));
         if let Some(mut stderr) = child.stderr.take() {
             let oom_evidence = oom_evidence.clone();
+            let stderr_tail = stderr_tail.clone();
+            let logger = logger.clone();
             tokio::spawn(async move {
-                let mut sink = Vec::new();
-                let _ = stderr.read_to_end(&mut sink).await;
-                let text = String::from_utf8_lossy(&sink).to_ascii_lowercase();
-                if ["bad_alloc", "bad allocation", "out of memory", "oom"]
-                    .iter()
-                    .any(|needle| text.contains(needle))
-                {
-                    oom_evidence.store(true, Ordering::Release);
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    let read = match stderr.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    let bytes = &chunk[..read];
+                    let text = String::from_utf8_lossy(bytes);
+                    let lower = text.to_ascii_lowercase();
+                    if ["bad_alloc", "bad allocation", "out of memory", "oom"]
+                        .iter()
+                        .any(|needle| lower.contains(needle))
+                    {
+                        oom_evidence.store(true, Ordering::Release);
+                    }
+                    if let Some(logger) = &logger {
+                        let _ = logger.write(crate::observability::LogKind::Error, text.trim_end());
+                    }
+                    let mut tail = stderr_tail.lock().await;
+                    tail.extend(bytes.iter().copied());
+                    while tail.len() > 64 * 1024 {
+                        tail.pop_front();
+                    }
                 }
             });
         }
@@ -143,6 +180,7 @@ impl BackendProcess {
             config,
             client: Client::new(),
             oom_evidence,
+            stderr_tail,
         })
     }
 
@@ -181,6 +219,12 @@ impl BackendHandle {
 
     pub fn has_oom_evidence(&self) -> bool {
         self.oom_evidence.load(Ordering::Acquire)
+    }
+
+    pub async fn stderr_tail(&self, max_bytes: usize) -> String {
+        let tail = self.stderr_tail.lock().await;
+        let skip = tail.len().saturating_sub(max_bytes.max(1));
+        String::from_utf8_lossy(&tail.iter().skip(skip).copied().collect::<Vec<_>>()).into_owned()
     }
 
     pub async fn is_running(&self) -> bool {

@@ -237,7 +237,8 @@ impl Gateway {
             .config
             .backend_config()
             .ok_or_else(|| anyhow!("backend executable is not configured"))?;
-        let handle = Arc::new(BackendProcess::start(config).await?);
+        let handle =
+            Arc::new(BackendProcess::start_with_logger(config, self.inner.logger.clone()).await?);
         if let Err(error) = handle.wait_ready().await {
             let _ = handle.stop().await;
             return Err(error);
@@ -402,6 +403,19 @@ fn default_log_bytes() -> usize {
 }
 
 async fn logs(State(gateway): State<Arc<Gateway>>, Query(query): Query<LogQuery>) -> Response {
+    if query.kind == "backend" {
+        let backend = gateway.inner.backend.lock().await.clone();
+        let Some(backend) = backend else {
+            return error_response(StatusCode::NOT_FOUND, "backend is not running".to_owned());
+        };
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(Body::from(
+                backend.stderr_tail(query.max_bytes.min(256 * 1024)).await,
+            ))
+            .unwrap();
+    }
     let Some(logger) = &gateway.inner.logger else {
         return error_response(StatusCode::NOT_FOUND, "logging is unavailable".to_owned());
     };

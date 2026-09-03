@@ -38,6 +38,9 @@ async fn main() {
     ));
     let oom_pending = Arc::new(AtomicBool::new(args.iter().any(|arg| arg == "--oom-once")));
     let oom_marker = argument(&args, "--oom-marker").map(PathBuf::from);
+    if let Some(line) = argument(&args, "--stderr-line") {
+        eprintln!("{line}");
+    }
     if let Some(marker) = &oom_marker {
         if marker.exists() {
             oom_pending.store(false, Ordering::Release);
