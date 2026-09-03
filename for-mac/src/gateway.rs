@@ -34,6 +34,7 @@ use tokio::{
     sync::{watch, Mutex, Notify, RwLock},
     time::{sleep, Instant},
 };
+use tower_http::cors::CorsLayer;
 
 #[derive(Clone)]
 pub struct Gateway {
@@ -129,6 +130,7 @@ impl Gateway {
             .route("/__backend/props", get(backend_props))
             .route("/__backend/metrics", get(backend_metrics))
             .route("/v1/*path", any(proxy))
+            .layer(CorsLayer::very_permissive())
             .with_state(self)
     }
 
