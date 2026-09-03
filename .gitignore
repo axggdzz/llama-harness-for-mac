@@ -34,3 +34,9 @@ parse_sse.ps1
 
 # 临时视图
 views/
+
+# macOS/Tauri generated assets and build output
+for-mac/ui/node_modules/
+for-mac/ui/dist/
+for-mac/src-tauri/target/
+for-mac/src-tauri/gen/
