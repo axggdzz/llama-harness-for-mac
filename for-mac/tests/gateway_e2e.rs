@@ -113,6 +113,34 @@ async fn gateway_starts_backend_for_json_and_streaming_requests() {
         .await
         .unwrap();
     assert!(stats["requests"].as_u64().unwrap() >= 3);
+    let resources = client
+        .get(format!("{base}/__resources__"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert!(resources.get("gpu_backend").is_some());
+    let metrics = client
+        .get(format!("{base}/__backend/metrics"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(metrics.status(), 200);
+    assert!(metrics
+        .text()
+        .await
+        .unwrap()
+        .contains("mock_requests_total"));
+    for path in ["slots", "props"] {
+        let response = client
+            .get(format!("{base}/__backend/{path}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
     let backend_pid = gateway.backend_pid().await.expect("running backend pid");
     let _ = shutdown_tx.send(());
     serving.await.unwrap();

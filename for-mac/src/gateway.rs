@@ -3,6 +3,7 @@ use crate::{
     lifecycle::LifecyclePhase,
     observability::{LogKind, RotatingLogger, Stats},
     process::{BackendHandle, BackendProcess},
+    resources::ResourceSnapshot,
     slot_affinity::{SlotAffinity, SlotBinding},
     thinking,
     token_guard::{GuardError, TokenGuard, TokenGuardConfig},
@@ -123,6 +124,10 @@ impl Gateway {
             .route("/__status__", get(status))
             .route("/health", get(gateway_health))
             .route("/__stats__", get(stats))
+            .route("/__resources__", get(resources))
+            .route("/__backend/slots", get(backend_slots))
+            .route("/__backend/props", get(backend_props))
+            .route("/__backend/metrics", get(backend_metrics))
             .route("/v1/*path", any(proxy))
             .with_state(self)
     }
@@ -322,6 +327,45 @@ async fn status(State(gateway): State<Arc<Gateway>>) -> impl IntoResponse {
 
 async fn stats(State(gateway): State<Arc<Gateway>>) -> impl IntoResponse {
     Json(gateway.inner.stats.snapshot())
+}
+
+async fn resources() -> impl IntoResponse {
+    Json(ResourceSnapshot::collect())
+}
+
+async fn backend_slots(State(gateway): State<Arc<Gateway>>) -> Response {
+    backend_snapshot(&gateway, "/slots").await
+}
+
+async fn backend_props(State(gateway): State<Arc<Gateway>>) -> Response {
+    backend_snapshot(&gateway, "/props").await
+}
+
+async fn backend_metrics(State(gateway): State<Arc<Gateway>>) -> Response {
+    backend_snapshot(&gateway, "/metrics").await
+}
+
+async fn backend_snapshot(gateway: &Gateway, path: &str) -> Response {
+    let backend = match gateway.ensure_backend().await {
+        Ok(backend) => backend,
+        Err(error) => return error_response(StatusCode::BAD_GATEWAY, error.to_string()),
+    };
+    let response = match gateway
+        .inner
+        .client
+        .get(format!("{}{}", backend.base_url(), path))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => return error_response(StatusCode::BAD_GATEWAY, error.to_string()),
+    };
+    let status = response.status();
+    let headers = response.headers().clone();
+    match response.bytes().await {
+        Ok(bytes) => response_from_bytes(status, &headers, axum::body::Bytes::from(bytes)),
+        Err(error) => error_response(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
 }
 
 async fn gateway_health(State(gateway): State<Arc<Gateway>>) -> Response {

@@ -5,6 +5,7 @@ pub mod kv_cache;
 pub mod lifecycle;
 pub mod observability;
 pub mod process;
+pub mod resources;
 pub mod slot_affinity;
 pub mod thinking;
 pub mod token_guard;

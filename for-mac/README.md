@@ -111,3 +111,8 @@ Phase 5A adds rotating main/slot/error logs and request statistics. Logs use
 macOS Application Support-compatible paths; `request_dump_enabled` is off by
 default. `GET /__stats__` returns request, token, restore, and slot counters for
 the future dashboard UI.
+
+Phase 5B adds `GET /__resources__` for CPU/unified-memory metrics and
+`/__backend/slots`, `/__backend/props`, and `/__backend/metrics` for raw backend
+probe responses. Metal capability text is exposed instead of CUDA/NVIDIA
+assumptions.
