@@ -117,6 +117,22 @@ Phase 5B adds `GET /__resources__` for CPU/unified-memory metrics and
 probe responses. Metal capability text is exposed instead of CUDA/NVIDIA
 assumptions.
 
+## Phase 6 runtime hardening and UI
+
+The Tauri 2 dashboard preserves the seven Windows information tabs and exposes
+wake/stop, configuration, KV, statistics, resources, raw probes, and capability
+status. `GET /__capabilities__` probes `/props`, `/slots`, `/metrics`, and
+`/v1/tokenize`; a real executable named `llama-server` is also checked with
+`--help` before startup so unsupported flags are removed safely. Probe failures
+keep the original argument array. Backend stderr is retained as a bounded tail,
+written to `errors.log`, and available through
+`GET /__logs__?kind=backend&max_bytes=...`.
+
+Build the desktop shell from `ui/` with `npm run build` (the default produces
+an `.app`; `npm run build:dmg` requires a functional macOS `hdiutil`). Real
+Metal/GGUF smoke testing, signing, notarization, and DMG validation remain
+machine-specific release checks.
+
 ## Gateway controls and dashboard wiring
 
 `GET /__config__` reads the active configuration and `PUT /__config__` validates
