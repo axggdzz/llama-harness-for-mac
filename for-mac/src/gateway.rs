@@ -584,6 +584,13 @@ async fn proxy_inner(
     }
     let allocated_slot = allocation.as_ref().map(|item| item.slot);
     let allocated_key = allocation.as_ref().and_then(|item| item.key.clone());
+    if let Some(evicted) = allocation.as_ref().and_then(|item| item.evicted.as_ref()) {
+        if evicted.kv_cache {
+            if let Err(error) = gateway.inner.kv.save(evicted.slot, &evicted.key).await {
+                tracing::warn!(target = "kv", %error, key = %evicted.key, "KV save before slot eviction failed");
+            }
+        }
+    }
     if let (Some(slot), Some(key)) = (allocated_slot, allocated_key.as_deref()) {
         if gateway.inner.kv.has_snapshot(key) {
             match gateway.inner.kv.restore(slot, key).await {

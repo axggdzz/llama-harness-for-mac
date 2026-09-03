@@ -218,3 +218,60 @@ async fn control_endpoints_wake_and_stop_backend() {
     let _ = shutdown_tx.send(());
     serving.await.unwrap();
 }
+
+#[tokio::test]
+async fn slot_eviction_saves_previous_binding_kv_snapshot() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let mut config = AppConfig::default();
+    config.backend_executable = Some(PathBuf::from(env!("CARGO_BIN_EXE_mock-llama-server")));
+    config.backend_args = vec!["--port".into(), "18084".into()];
+    config.backend_port = 18084;
+    config.slot_count = 2;
+    config.data_dir = data_dir.path().to_path_buf();
+    config.ready_timeout_ms = 5_000;
+    let gateway = Arc::new(Gateway::new(config));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = {
+        let gateway = gateway.clone();
+        tokio::spawn(async move {
+            gateway
+                .serve(listener, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        })
+    };
+    let client = Client::new();
+    let base = format!("http://{address}");
+    for key in ["one", "two", "three"] {
+        let response = client
+            .post(format!("{base}/v1/chat/completions"))
+            .header("x-conversation-id", key)
+            .json(&serde_json::json!({"model":"mock","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+    let snapshots = client
+        .get(format!("{base}/__kv__"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert!(
+        snapshots
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["key"] == "webui_one" || item["key"] == "webui_two"),
+        "snapshots={snapshots}"
+    );
+    let _ = shutdown_tx.send(());
+    serving.await.unwrap();
+}
