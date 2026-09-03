@@ -78,3 +78,14 @@ token count, metadata, and SHA-256 before restore; malformed or modified
 snapshots are rejected and removed. The manager exposes asynchronous
 `save`, `restore`, `erase`, `clear_all`, `snapshot`, and `delete_snapshot`
 operations and persists an atomic `kv_cache_index.json`.
+
+## Phase 4A TokenGuard
+
+TokenGuard is enabled with `token_guard_enabled` and `context_size` in
+`AppConfig`. Before forwarding a JSON chat request, the gateway calls the
+backend's `/v1/tokenize`, reserves output and prompt-headroom tokens per slot,
+removes old turns, and trims oversized string content while preserving the
+latest turn. Tokenizer failures degrade to the original request; requests that
+remain over budget receive a structured HTTP 400 response. The mock backend
+implements `/v1/tokenize`, and `tests/token_guard_e2e.rs` covers successful
+trimming and rejection.

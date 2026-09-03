@@ -3,6 +3,7 @@ use crate::{
     lifecycle::LifecyclePhase,
     process::{BackendHandle, BackendProcess},
     slot_affinity::{SlotAffinity, SlotBinding},
+    token_guard::{GuardError, TokenGuard, TokenGuardConfig},
 };
 use anyhow::{anyhow, Result};
 use axum::{
@@ -344,11 +345,66 @@ async fn proxy_inner(
         Ok(body) => body,
         Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
     };
-    let body = if let Some(allocation) = allocation {
-        inject_slot(body, allocation.slot)
-    } else {
-        body
-    };
+    let mut body = body;
+    if allocation.is_some() || gateway.inner.config.token_guard_enabled {
+        if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) {
+            if let Some(allocation) = allocation {
+                inject_slot_value(&mut value, allocation.slot);
+            }
+            if gateway.inner.config.token_guard_enabled {
+                if let Some(context_size) = gateway.inner.config.context_size {
+                    let token_config = TokenGuardConfig {
+                        context_size,
+                        slot_count: gateway.inner.config.slot_count,
+                        reserved_output_tokens: gateway.inner.config.reserved_output_tokens,
+                        reserved_prompt_overhead: gateway.inner.config.reserved_prompt_overhead,
+                        enabled: true,
+                    };
+                    let client = &gateway.inner.client;
+                    let base_url = backend.base_url();
+                    match TokenGuard::guard(&token_config, &mut value, |text| {
+                        let base_url = &base_url;
+                        async move { TokenGuard::count_tokens(client, base_url, &text).await }
+                    })
+                    .await
+                    {
+                        Ok(report) => {
+                            tracing::debug!(
+                                target = "token_guard",
+                                modified = report.modified,
+                                skipped = report.skipped,
+                                estimated_tokens = ?report.estimated_tokens,
+                                final_tokens = ?report.final_tokens,
+                                budget = report.budget,
+                                deleted_turns = report.deleted_turns,
+                                "[TOKEN-GUARD] request evaluated"
+                            );
+                        }
+                        Err(error) => {
+                            if let Some(GuardError::OverBudget { budget, tokens }) =
+                                error.downcast_ref::<GuardError>()
+                            {
+                                tracing::warn!(
+                                    target = "token_guard",
+                                    budget,
+                                    tokens,
+                                    "[TOKEN-GUARD-REJECTED] request exceeds context budget"
+                                );
+                                return token_guard_error_response(*budget, *tokens);
+                            }
+                            return error_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                error.to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+            if let Ok(serialized) = serde_json::to_vec(&value) {
+                body = axum::body::Bytes::from(serialized);
+            }
+        }
+    }
 
     let mut builder = gateway.inner.client.request(method, url).body(body);
     for (name, value) in &headers {
@@ -385,20 +441,15 @@ async fn proxy_inner(
     }
 }
 
-fn inject_slot(body: axum::body::Bytes, slot: usize) -> axum::body::Bytes {
-    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
-        return body;
-    };
+fn inject_slot_value(value: &mut serde_json::Value, slot: usize) -> bool {
     let Some(object) = value.as_object_mut() else {
-        return body;
+        return false;
     };
     if object.contains_key("n_slots") {
-        return body;
+        return false;
     }
     object.insert("n_slots".to_owned(), serde_json::json!(slot));
-    serde_json::to_vec(&value)
-        .map(axum::body::Bytes::from)
-        .unwrap_or(body)
+    true
 }
 
 struct RequestLease {
@@ -486,6 +537,27 @@ fn error_response(status: StatusCode, message: String) -> Response {
     let mut response = (
         status,
         Json(serde_json::json!({"error": {"message": message}})),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
+fn token_guard_error_response(budget: usize, tokens: usize) -> Response {
+    let mut response = (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": {
+                "message": format!("Token Guard: {tokens} tokens exceed budget {budget}"),
+                "type": "invalid_request_error",
+                "code": "token_guard_over_budget",
+                "budget": budget,
+                "tokens": tokens,
+            }
+        })),
     )
         .into_response();
     response.headers_mut().insert(

@@ -4,3 +4,4 @@ pub mod kv_cache;
 pub mod lifecycle;
 pub mod process;
 pub mod slot_affinity;
+pub mod token_guard;

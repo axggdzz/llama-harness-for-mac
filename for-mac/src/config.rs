@@ -27,6 +27,14 @@ pub struct AppConfig {
     #[serde(default = "default_slot_count")]
     pub slot_count: usize,
     #[serde(default)]
+    pub token_guard_enabled: bool,
+    #[serde(default)]
+    pub context_size: Option<usize>,
+    #[serde(default = "default_reserved_output_tokens")]
+    pub reserved_output_tokens: usize,
+    #[serde(default = "default_reserved_prompt_overhead")]
+    pub reserved_prompt_overhead: usize,
+    #[serde(default)]
     pub slot_bindings_path: Option<PathBuf>,
     #[serde(default)]
     pub auto_preemptive_prefixes: Vec<String>,
@@ -58,6 +66,10 @@ impl Default for AppConfig {
             idle_timeout_ms: default_idle_timeout_ms(),
             sleep_observe_ms: default_sleep_observe_ms(),
             slot_count: default_slot_count(),
+            token_guard_enabled: false,
+            context_size: None,
+            reserved_output_tokens: default_reserved_output_tokens(),
+            reserved_prompt_overhead: default_reserved_prompt_overhead(),
             slot_bindings_path: None,
             auto_preemptive_prefixes: Vec::new(),
             data_dir: default_data_dir(),
@@ -103,6 +115,12 @@ fn default_sleep_observe_ms() -> u64 {
 }
 fn default_slot_count() -> usize {
     1
+}
+fn default_reserved_output_tokens() -> usize {
+    1024
+}
+fn default_reserved_prompt_overhead() -> usize {
+    10240
 }
 
 fn default_data_dir() -> PathBuf {

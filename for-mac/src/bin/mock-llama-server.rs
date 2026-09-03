@@ -67,6 +67,16 @@ async fn main() {
         )
         .route("/props", get(|| async { Json(json!({"mock":true})) }))
         .route(
+            "/v1/tokenize",
+            post(|Json(payload): Json<Value>| async move {
+                let content = payload
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                Json(json!({"n_tokens": content.chars().count()}))
+            }),
+        )
+        .route(
             "/metrics",
             get(|| async { (StatusCode::OK, "mock_requests_total 1\n") }),
         )
@@ -99,6 +109,16 @@ async fn completion_response(payload: Value, force_sse: bool) -> Response {
             .and_then(Value::as_bool)
             .unwrap_or(false);
     if !stream {
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let prompt_chars = messages
+            .iter()
+            .filter_map(|message| message.get("content").and_then(Value::as_str))
+            .map(|value| value.chars().count())
+            .sum::<usize>();
         return Response::new(Body::from(
             json!({
                 "id":"mock-completion",
@@ -107,6 +127,8 @@ async fn completion_response(payload: Value, force_sse: bool) -> Response {
                 "model":payload.get("model").and_then(Value::as_str).unwrap_or("mock"),
                 "choices":[{"index":0,"message":{"role":"assistant","content":"mock response"},"finish_reason":"stop"}],
                 "x_n_slots": payload.get("n_slots").cloned().unwrap_or(Value::Null),
+                "x_message_count": messages.len(),
+                "x_prompt_chars": prompt_chars,
                 "usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}
             })
             .to_string(),
