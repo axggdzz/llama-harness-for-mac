@@ -80,7 +80,7 @@ JSON 结构保持跨版本宽容：
   "bindings": {
     "trae_global": {
       "slot": 0,
-      "last_active": "2026-09-03T00:00:00Z",
+      "last_active": "1756857600000",
       "preemptive": true,
       "kv_cache": true
     }
@@ -88,7 +88,7 @@ JSON 结构保持跨版本宽容：
 }
 ```
 
-加载时忽略缺失 key、无效时间、重复 slot 和超出当前 `slot_count` 的记录；旧字段缺省为 `preemptive=false`、`kv_cache=true`。
+`last_active` 使用 Unix epoch 毫秒字符串，便于无额外日期依赖地跨平台解析。加载时忽略缺失 key、无效时间、重复 slot 和超出当前 `slot_count` 的记录；旧字段缺省为 `preemptive=false`、`kv_cache=true`。
 
 ## 网关接入
 
@@ -124,4 +124,3 @@ JSON 结构保持跨版本宽容：
 ## 后续阶段边界
 
 第三阶段 B 仅消费 `SlotAllocation.evicted` 与 `SlotBinding.kv_cache`，实现 `/slots/{id}?action=save|restore|erase`、快照索引和元数据校验；不改变本阶段的 key 识别和分配算法。
-

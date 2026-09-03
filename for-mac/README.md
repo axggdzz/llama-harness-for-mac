@@ -65,3 +65,7 @@ snapshots, TokenGuard, continuation, or crash-recovery policies; those are the
 next migration stages described in `docs/spec.md`. Phase 2 adds the
 `Standby/Waking/Warming/Running/Sleeping` scheduler, configurable idle sleep,
 and cancellation of the sleep observation window when a new request arrives.
+
+Phase 3A adds SlotAffinity header recognition, stable `n_slots` routing, LRU
+eviction, preemptive/Tool locking, and atomic binding persistence. KV snapshot
+operations remain reserved for Phase 3B.
