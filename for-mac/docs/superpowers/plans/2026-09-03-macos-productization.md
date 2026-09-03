@@ -35,7 +35,7 @@
 - [ ] 将错误、不可用能力和请求进行中的状态显示在现有七页签布局中。
 - [ ] 保持默认暗色主题、中文字段和现有信息密度。
 
-### Task 3: KV and statistics integration (in progress)
+### Task 3: KV and statistics integration (completed)
 
 **Files:** `for-mac/src/gateway.rs`, `for-mac/src/kv_cache.rs`, `for-mac/src/observability.rs`, `for-mac/tests/`
 
