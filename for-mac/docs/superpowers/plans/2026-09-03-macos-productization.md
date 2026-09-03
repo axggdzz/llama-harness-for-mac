@@ -60,6 +60,8 @@
 - [ ] 启动前探测 `/props`/版本信息，按能力过滤不支持的参数并记录警告。
 - [ ] 补齐子进程提前退出、stderr 日志、OOM 熔断和重启后的状态清理。
 
+Tauri 壳层已直接托管 gateway，并在应用退出时触发 gateway shutdown；DMG、真实 Metal 能力探测和参数降级仍属于后续真机/发布验收。
+
 ### Task 6: Metal and release validation
 
 **Files:** `for-mac/docs/`, `for-mac/README.md`, CI/release metadata under `for-mac/`

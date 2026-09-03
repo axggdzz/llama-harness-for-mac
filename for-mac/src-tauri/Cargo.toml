@@ -8,6 +8,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+llama-harness-mac = { path = ".." }
+tokio = { version = "1.39", features = ["rt", "sync", "net"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
