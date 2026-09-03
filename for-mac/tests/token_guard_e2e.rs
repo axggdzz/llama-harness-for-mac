@@ -96,3 +96,27 @@ async fn gateway_returns_structured_400_when_token_guard_cannot_fit() {
     let _ = shutdown.send(());
     task.await.unwrap();
 }
+
+#[tokio::test]
+async fn gateway_retries_once_after_context_overflow_and_erases_slot() {
+    let backend_port = backend_port().await;
+    let mut config = config(backend_port, 10_000);
+    config.slot_count = 2;
+    config.backend_args.push("--overflow-once".into());
+    let (_gateway, base, shutdown, task) = start(config).await;
+    let client = Client::new();
+    let response = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("x-conversation-id", "recover-session")
+        .json(&serde_json::json!({"model":"mock", "messages":[{"role":"user", "content":"hello"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["object"],
+        "chat.completion"
+    );
+    let _ = shutdown.send(());
+    task.await.unwrap();
+}

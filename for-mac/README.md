@@ -89,3 +89,9 @@ latest turn. Tokenizer failures degrade to the original request; requests that
 remain over budget receive a structured HTTP 400 response. The mock backend
 implements `/v1/tokenize`, and `tests/token_guard_e2e.rs` covers successful
 trimming and rejection.
+
+Phase 4B adds one-shot context-overflow recovery. A backend 400 containing a
+known context-overflow marker causes the assigned slot to be erased and the
+same request to be retried once; unrelated 400 responses and a second failure
+are passed through unchanged. Set `context_overflow_recovery=false` to disable
+this behavior.

@@ -345,6 +345,7 @@ async fn proxy_inner(
         Ok(body) => body,
         Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
     };
+    let allocated_slot = allocation.as_ref().map(|item| item.slot);
     let mut body = body;
     if allocation.is_some() || gateway.inner.config.token_guard_enabled {
         if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) {
@@ -406,22 +407,45 @@ async fn proxy_inner(
         }
     }
 
-    let mut builder = gateway.inner.client.request(method, url).body(body);
-    for (name, value) in &headers {
-        if *name != header::HOST && *name != header::CONTENT_LENGTH {
-            builder = builder.header(name, value);
-        }
-    }
-    let response = match builder.send().await {
-        Ok(response) => response,
-        Err(error) => {
-            let backend = gateway.inner.backend.lock().await.take();
-            *gateway.inner.phase.write().await = LifecyclePhase::Standby;
-            if let Some(backend) = backend {
-                let _ = backend.stop().await;
+    let response =
+        match send_backend_request(&gateway.inner.client, &method, &url, &headers, body.clone())
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let backend = gateway.inner.backend.lock().await.take();
+                *gateway.inner.phase.write().await = LifecyclePhase::Standby;
+                if let Some(backend) = backend {
+                    let _ = backend.stop().await;
+                }
+                return error_response(StatusCode::BAD_GATEWAY, error.to_string());
             }
-            return error_response(StatusCode::BAD_GATEWAY, error.to_string());
+        };
+
+    let response = if gateway.inner.config.context_overflow_recovery
+        && response.status() == StatusCode::BAD_REQUEST
+    {
+        let status = response.status();
+        let response_headers = response.headers().clone();
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(error) => return error_response(StatusCode::BAD_GATEWAY, error.to_string()),
+        };
+        if is_context_overflow(&bytes) {
+            if let Some(slot) = allocated_slot {
+                let _ = erase_backend_slot(&gateway.inner.client, &backend.base_url(), slot).await;
+            }
+            match send_backend_request(&gateway.inner.client, &method, &url, &headers, body).await {
+                Ok(retry) => retry,
+                Err(error) => {
+                    return error_response(StatusCode::BAD_GATEWAY, error.to_string());
+                }
+            }
+        } else {
+            return response_from_bytes(status, &response_headers, bytes);
         }
+    } else {
+        response
     };
 
     let mut output = Response::builder().status(response.status());
@@ -439,6 +463,68 @@ async fn proxy_inner(
         }
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     }
+}
+
+async fn send_backend_request(
+    client: &Client,
+    method: &axum::http::Method,
+    url: &str,
+    headers: &axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<reqwest::Response> {
+    let mut builder = client.request(method.clone(), url).body(body);
+    for (name, value) in headers {
+        if *name != header::HOST && *name != header::CONTENT_LENGTH {
+            builder = builder.header(name, value);
+        }
+    }
+    Ok(builder.send().await?)
+}
+
+async fn erase_backend_slot(client: &Client, base_url: &str, slot: usize) -> Result<()> {
+    let response = client
+        .post(format!(
+            "{}/slots/{slot}?action=erase",
+            base_url.trim_end_matches('/')
+        ))
+        .send()
+        .await?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(anyhow!("KV erase failed with HTTP {}", response.status()))
+    }
+}
+
+fn is_context_overflow(body: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(body).to_ascii_lowercase();
+    [
+        "context",
+        "prompt too long",
+        "exceed",
+        "maximum context",
+        "n_ctx",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn response_from_bytes(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    bytes: axum::body::Bytes,
+) -> Response {
+    let mut output = Response::builder().status(status);
+    for (name, value) in headers {
+        if let Ok(name) = HeaderName::from_bytes(name.as_str().as_bytes()) {
+            if let Ok(value) = HeaderValue::from_bytes(value.as_bytes()) {
+                output = output.header(name, value);
+            }
+        }
+    }
+    output.body(Body::from(bytes)).unwrap_or_else(|error| {
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+    })
 }
 
 fn inject_slot_value(value: &mut serde_json::Value, slot: usize) -> bool {

@@ -8,7 +8,15 @@ use axum::{
 };
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap, convert::Infallible, net::SocketAddr, path::PathBuf, time::Duration,
+    collections::HashMap,
+    convert::Infallible,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 use tokio_stream::iter;
 
@@ -22,6 +30,9 @@ async fn main() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(0_u64);
     let force_sse = args.iter().any(|arg| arg == "--sse");
+    let overflow_pending = Arc::new(AtomicBool::new(
+        args.iter().any(|arg| arg == "--overflow-once"),
+    ));
 
     if startup_delay_ms > 0 {
         tokio::time::sleep(Duration::from_millis(startup_delay_ms)).await;
@@ -82,8 +93,18 @@ async fn main() {
         )
         .route(
             "/v1/chat/completions",
-            post(move |Json(payload): Json<Value>| async move {
-                completion_response(payload, force_sse).await
+            post(move |Json(payload): Json<Value>| {
+                let overflow_pending = overflow_pending.clone();
+                async move {
+                    if overflow_pending.swap(false, Ordering::AcqRel) {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error":{"message":"context size exceeded"}})),
+                        )
+                            .into_response();
+                    }
+                    completion_response(payload, force_sse).await
+                }
             }),
         );
     let addr = SocketAddr::from(([127, 0, 0, 1], port));

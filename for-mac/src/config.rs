@@ -34,6 +34,8 @@ pub struct AppConfig {
     pub reserved_output_tokens: usize,
     #[serde(default = "default_reserved_prompt_overhead")]
     pub reserved_prompt_overhead: usize,
+    #[serde(default = "default_context_overflow_recovery")]
+    pub context_overflow_recovery: bool,
     #[serde(default)]
     pub slot_bindings_path: Option<PathBuf>,
     #[serde(default)]
@@ -70,6 +72,7 @@ impl Default for AppConfig {
             context_size: None,
             reserved_output_tokens: default_reserved_output_tokens(),
             reserved_prompt_overhead: default_reserved_prompt_overhead(),
+            context_overflow_recovery: default_context_overflow_recovery(),
             slot_bindings_path: None,
             auto_preemptive_prefixes: Vec::new(),
             data_dir: default_data_dir(),
@@ -121,6 +124,9 @@ fn default_reserved_output_tokens() -> usize {
 }
 fn default_reserved_prompt_overhead() -> usize {
     10240
+}
+fn default_context_overflow_recovery() -> bool {
+    true
 }
 
 fn default_data_dir() -> PathBuf {
