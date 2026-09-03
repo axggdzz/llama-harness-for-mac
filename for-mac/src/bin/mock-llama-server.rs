@@ -69,6 +69,7 @@ async fn completion_response(payload: Value, force_sse: bool) -> Response {
                 "created":0,
                 "model":payload.get("model").and_then(Value::as_str).unwrap_or("mock"),
                 "choices":[{"index":0,"message":{"role":"assistant","content":"mock response"},"finish_reason":"stop"}],
+                "x_n_slots": payload.get("n_slots").cloned().unwrap_or(Value::Null),
                 "usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}
             })
             .to_string(),

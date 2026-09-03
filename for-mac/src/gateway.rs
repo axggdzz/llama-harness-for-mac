@@ -2,6 +2,7 @@ use crate::{
     config::AppConfig,
     lifecycle::LifecyclePhase,
     process::{BackendHandle, BackendProcess},
+    slot_affinity::{SlotAffinity, SlotBinding},
 };
 use anyhow::{anyhow, Result};
 use axum::{
@@ -37,6 +38,7 @@ pub struct Gateway {
 
 struct GatewayInner {
     config: AppConfig,
+    affinity: Option<Arc<SlotAffinity>>,
     client: Client,
     phase: RwLock<LifecyclePhase>,
     backend: Mutex<Option<Arc<BackendHandle>>>,
@@ -55,14 +57,34 @@ struct StatusResponse {
     backend_ready: bool,
     backend_port: u16,
     inflight: usize,
+    bindings: Vec<BindingStatus>,
+}
+
+#[derive(Debug, Serialize)]
+struct BindingStatus {
+    key: String,
+    app: String,
+    slot: usize,
+    preemptive: bool,
+    kv_cache: bool,
 }
 
 impl Gateway {
     pub fn new(config: AppConfig) -> Self {
         let (startup_changed, _) = watch::channel(0_u64);
+        let affinity = if config.slot_count > 1 {
+            let path = config
+                .slot_bindings_path
+                .clone()
+                .unwrap_or_else(|| config.data_dir.join("slot_bindings.json"));
+            Some(Arc::new(SlotAffinity::new(config.slot_count, path)))
+        } else {
+            None
+        };
         Self {
             inner: Arc::new(GatewayInner {
                 config,
+                affinity,
                 client: Client::new(),
                 phase: RwLock::new(LifecyclePhase::Standby),
                 backend: Mutex::new(None),
@@ -187,6 +209,24 @@ impl Gateway {
             backend_ready: self.inner.backend.lock().await.is_some(),
             backend_port: self.inner.config.backend_port,
             inflight: self.inner.inflight.load(Ordering::SeqCst),
+            bindings: self
+                .inner
+                .affinity
+                .as_ref()
+                .map(|affinity| {
+                    affinity
+                        .snapshot()
+                        .into_iter()
+                        .map(|binding: SlotBinding| BindingStatus {
+                            key: binding.key,
+                            app: binding.app,
+                            slot: binding.slot,
+                            preemptive: binding.preemptive,
+                            kv_cache: binding.kv_cache,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -281,6 +321,12 @@ async fn proxy_inner(
     request: Request<Body>,
     lease: Arc<RequestLease>,
 ) -> Response {
+    let allocation = gateway.inner.affinity.as_ref().map(|affinity| {
+        affinity.allocate(
+            request.headers(),
+            &gateway.inner.config.auto_preemptive_prefixes,
+        )
+    });
     let backend = match gateway.ensure_backend().await {
         Ok(backend) => backend,
         Err(error) => return error_response(StatusCode::BAD_GATEWAY, error.to_string()),
@@ -297,6 +343,11 @@ async fn proxy_inner(
     let body = match to_bytes(request.into_body(), 16 * 1024 * 1024).await {
         Ok(body) => body,
         Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    let body = if let Some(allocation) = allocation {
+        inject_slot(body, allocation.slot)
+    } else {
+        body
     };
 
     let mut builder = gateway.inner.client.request(method, url).body(body);
@@ -332,6 +383,22 @@ async fn proxy_inner(
         }
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     }
+}
+
+fn inject_slot(body: axum::body::Bytes, slot: usize) -> axum::body::Bytes {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return body;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return body;
+    };
+    if object.contains_key("n_slots") {
+        return body;
+    }
+    object.insert("n_slots".to_owned(), serde_json::json!(slot));
+    serde_json::to_vec(&value)
+        .map(axum::body::Bytes::from)
+        .unwrap_or(body)
 }
 
 struct RequestLease {

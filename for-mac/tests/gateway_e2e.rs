@@ -19,6 +19,8 @@ async fn gateway_starts_backend_for_json_and_streaming_requests() {
     config.backend_port = 18082;
     config.ready_timeout_ms = 5_000;
     config.ready_poll_ms = 20;
+    config.slot_count = 2;
+    config.slot_bindings_path = Some(tempfile::tempdir().unwrap().path().join("bindings.json"));
 
     let gateway = Arc::new(Gateway::new(config));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080")
@@ -54,15 +56,27 @@ async fn gateway_starts_backend_for_json_and_streaming_requests() {
         serde_json::json!({"model":"mock","messages":[{"role":"user","content":"hello"}]});
     let response = client
         .post(format!("{base}/v1/chat/completions"))
+        .header("x-conversation-id", "same-session")
         .json(&payload)
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
-    assert_eq!(
-        response.json::<serde_json::Value>().await.unwrap()["object"],
-        "chat.completion"
-    );
+    let response_json = response.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(response_json["object"], "chat.completion");
+    assert_eq!(response_json["x_n_slots"], 0);
+
+    let explicit = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("x-conversation-id", "same-session")
+        .json(&serde_json::json!({"model":"mock","n_slots":1,"messages":[]}))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(explicit["x_n_slots"], 1);
 
     let stream_payload = serde_json::json!({"model":"mock","stream":true,"messages":[]});
     let stream = client
@@ -89,6 +103,7 @@ async fn gateway_starts_backend_for_json_and_streaming_requests() {
         status["phase"],
         serde_json::to_value(LifecyclePhase::Running).unwrap()
     );
+    assert_eq!(status["bindings"][0]["key"], "webui_same-session");
     let backend_pid = gateway.backend_pid().await.expect("running backend pid");
     let _ = shutdown_tx.send(());
     serving.await.unwrap();
