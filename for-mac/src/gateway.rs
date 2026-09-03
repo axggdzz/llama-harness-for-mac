@@ -14,7 +14,7 @@ use axum::{
     extract::State,
     http::{header, HeaderName, HeaderValue, Request, StatusCode},
     response::{IntoResponse, Response},
-    routing::{any, get},
+    routing::{any, get, post},
     Json, Router,
 };
 use futures_util::Stream;
@@ -123,6 +123,9 @@ impl Gateway {
     pub fn router(self: Arc<Self>) -> Router {
         Router::new()
             .route("/__status__", get(status))
+            .route("/__config__", get(config).put(update_config))
+            .route("/__control/wake", post(wake_backend))
+            .route("/__control/stop", post(stop_backend))
             .route("/health", get(gateway_health))
             .route("/__stats__", get(stats))
             .route("/__resources__", get(resources))
@@ -325,6 +328,38 @@ impl Gateway {
 
 async fn status(State(gateway): State<Arc<Gateway>>) -> impl IntoResponse {
     Json(gateway.status().await)
+}
+
+async fn config(State(gateway): State<Arc<Gateway>>) -> impl IntoResponse {
+    Json(gateway.inner.config.clone())
+}
+
+async fn update_config(
+    State(_gateway): State<Arc<Gateway>>,
+    Json(config): Json<AppConfig>,
+) -> Response {
+    if let Err(error) = config.validate() {
+        return error_response(StatusCode::BAD_REQUEST, error.to_string());
+    }
+    let path = config.config_path();
+    match config.save_to(path) {
+        Ok(()) => Json(config).into_response(),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn wake_backend(State(gateway): State<Arc<Gateway>>) -> Response {
+    match gateway.ensure_backend().await {
+        Ok(_) => Json(gateway.status().await).into_response(),
+        Err(error) => error_response(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
+async fn stop_backend(State(gateway): State<Arc<Gateway>>) -> Response {
+    match gateway.stop_now().await {
+        Ok(()) => Json(gateway.status().await).into_response(),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
 }
 
 async fn stats(State(gateway): State<Arc<Gateway>>) -> impl IntoResponse {

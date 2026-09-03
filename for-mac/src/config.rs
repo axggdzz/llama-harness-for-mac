@@ -1,7 +1,11 @@
 use crate::thinking::ThinkingMode;
+use anyhow::{anyhow, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -109,6 +113,43 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    pub fn config_path(&self) -> PathBuf {
+        self.data_dir.join("config.json")
+    }
+
+    pub fn load_from(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let bytes = fs::read(path)?;
+        let config: Self = serde_json::from_slice(&bytes)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn save_to(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.validate()?;
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let temporary = path.with_extension("json.tmp");
+        fs::write(&temporary, serde_json::to_vec_pretty(self)?)?;
+        fs::rename(temporary, path)?;
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.gateway_port == 0 {
+            return Err(anyhow!("gateway_port must be non-zero"));
+        }
+        if self.backend_port == 0 {
+            return Err(anyhow!("backend_port must be non-zero"));
+        }
+        if self.slot_count == 0 {
+            return Err(anyhow!("slot_count must be greater than zero"));
+        }
+        Ok(())
+    }
+
     pub fn backend_config(&self) -> Option<BackendConfig> {
         self.backend_executable
             .clone()
@@ -183,6 +224,8 @@ fn default_log_max_bytes() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     #[test]
     fn defaults_use_fixed_gateway_port_and_application_support() {
         let config = super::AppConfig::default();
@@ -191,5 +234,18 @@ mod tests {
             .data_dir
             .to_string_lossy()
             .contains("Application Support"));
+    }
+
+    #[test]
+    fn config_round_trips_atomically_and_rejects_invalid_ports() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nested/config.json");
+        let mut config = super::AppConfig::default();
+        config.backend_port = 9123;
+        config.save_to(&path).unwrap();
+        let loaded = super::AppConfig::load_from(&path).unwrap();
+        assert_eq!(loaded.backend_port, 9123);
+        config.gateway_port = 0;
+        assert!(config.save_to(&path).is_err());
     }
 }

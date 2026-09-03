@@ -7,6 +7,9 @@ use std::{path::PathBuf, sync::Arc};
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let mut config = AppConfig::default();
+    if let Ok(saved) = AppConfig::load_from(config.config_path()) {
+        config = saved;
+    }
     if let Ok(executable) = std::env::var("LLAMA_SERVER") {
         config.backend_executable = Some(PathBuf::from(executable));
     }

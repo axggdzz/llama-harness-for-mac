@@ -147,3 +147,54 @@ async fn gateway_starts_backend_for_json_and_streaming_requests() {
     sleep(Duration::from_millis(50)).await;
     assert!(unsafe { libc::kill(backend_pid as libc::pid_t, 0) } != 0);
 }
+
+#[tokio::test]
+async fn control_endpoints_wake_and_stop_backend() {
+    let mut config = AppConfig::default();
+    config.backend_executable = Some(PathBuf::from(env!("CARGO_BIN_EXE_mock-llama-server")));
+    config.backend_args = vec!["--port".into(), "18083".into()];
+    config.backend_port = 18083;
+    config.ready_timeout_ms = 5_000;
+    config.ready_poll_ms = 20;
+    config.data_dir = tempfile::tempdir().unwrap().path().to_path_buf();
+    let gateway = Arc::new(Gateway::new(config));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = {
+        let gateway = gateway.clone();
+        tokio::spawn(async move {
+            gateway
+                .serve(listener, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        })
+    };
+    let client = Client::new();
+    let base = format!("http://{address}");
+    let wake = client
+        .post(format!("{base}/__control/wake"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wake.status(), 200);
+    assert_eq!(
+        wake.json::<serde_json::Value>().await.unwrap()["backend_ready"],
+        true
+    );
+
+    let stop = client
+        .post(format!("{base}/__control/stop"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stop.status(), 200);
+    assert_eq!(
+        stop.json::<serde_json::Value>().await.unwrap()["backend_ready"],
+        false
+    );
+    let _ = shutdown_tx.send(());
+    serving.await.unwrap();
+}
