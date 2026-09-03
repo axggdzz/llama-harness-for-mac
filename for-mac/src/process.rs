@@ -91,38 +91,40 @@ impl BackendHandle {
         let deadline = Instant::now() + Duration::from_millis(self.config.ready_timeout_ms);
         let url = format!("{}/health", self.base_url());
         loop {
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            if now >= deadline {
                 return Err(anyhow!(
                     "backend readiness timeout after {}ms",
                     self.config.ready_timeout_ms
                 ));
             }
 
-            if let Some(status) = self
-                .client
-                .get(&url)
-                .send()
-                .await
-                .ok()
-                .filter(|response| response.status().is_success())
             {
-                if status
-                    .json::<serde_json::Value>()
-                    .await
-                    .ok()
-                    .and_then(|json| {
-                        json.get("status")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .as_deref()
-                    == Some("ok")
-                {
-                    return Ok(());
+                let mut child = self.child.lock().await;
+                if let Some(child) = child.as_mut() {
+                    if let Some(status) = child.try_wait()? {
+                        return Err(anyhow!("backend exited before readiness: {status}"));
+                    }
+                } else {
+                    return Err(anyhow!("backend process is not running"));
                 }
             }
 
-            sleep(Duration::from_millis(self.config.ready_poll_ms)).await;
+            let remaining = deadline.saturating_duration_since(now);
+
+            if let Ok(Ok(response)) = timeout(remaining, self.client.get(&url).send()).await {
+                if response.status().is_success() {
+                    if let Ok(Ok(json)) =
+                        timeout(remaining, response.json::<serde_json::Value>()).await
+                    {
+                        if json.get("status").and_then(serde_json::Value::as_str) == Some("ok") {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
+            sleep(Duration::from_millis(self.config.ready_poll_ms).min(remaining)).await;
         }
     }
 

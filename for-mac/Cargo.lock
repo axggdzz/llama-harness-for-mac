@@ -577,6 +577,7 @@ dependencies = [
  "anyhow",
  "axum",
  "directories",
+ "futures-util",
  "http-body-util",
  "libc",
  "reqwest",

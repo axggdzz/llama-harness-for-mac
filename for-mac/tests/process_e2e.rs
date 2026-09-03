@@ -26,3 +26,19 @@ async fn process_manager_waits_for_readiness_and_stops_group() {
     sleep(Duration::from_millis(50)).await;
     assert!(unsafe { libc::kill(pid as libc::pid_t, 0) } != 0);
 }
+
+#[tokio::test]
+async fn readiness_reports_an_early_backend_exit() {
+    let config = BackendConfig {
+        executable: PathBuf::from("/usr/bin/true"),
+        args: Vec::new(),
+        host: "127.0.0.1".into(),
+        port: 18999,
+        ready_timeout_ms: 5_000,
+        ready_poll_ms: 20,
+    };
+    let handle = BackendProcess::start(config).await.unwrap();
+    let error = handle.wait_ready().await.unwrap_err().to_string();
+    assert!(error.contains("exited before readiness"));
+    handle.stop().await.unwrap();
+}

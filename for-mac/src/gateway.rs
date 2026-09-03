@@ -12,13 +12,16 @@ use axum::{
     routing::{any, get},
     Json, Router,
 };
+use futures_util::Stream;
 use reqwest::Client;
 use serde::Serialize;
 use std::{
+    pin::Pin,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
+    task::{Context, Poll},
     time::Duration,
 };
 use tokio::{
@@ -197,9 +200,11 @@ impl Gateway {
         *self.inner.last_activity.lock().await = Instant::now();
     }
 
-    async fn end_request(&self) {
+    fn finish_request_sync(&self) {
         self.inner.inflight.fetch_sub(1, Ordering::SeqCst);
-        *self.inner.last_activity.lock().await = Instant::now();
+        if let Ok(mut last_activity) = self.inner.last_activity.try_lock() {
+            *last_activity = Instant::now();
+        }
     }
 
     async fn idle_monitor(self: Arc<Self>) {
@@ -265,12 +270,17 @@ async fn gateway_health(State(gateway): State<Arc<Gateway>>) -> Response {
 
 async fn proxy(State(gateway): State<Arc<Gateway>>, request: Request<Body>) -> Response {
     gateway.begin_request().await;
-    let response = proxy_inner(&gateway, request).await;
-    gateway.end_request().await;
+    let lease = Arc::new(RequestLease::new(gateway.clone()));
+    let response = proxy_inner(&gateway, request, lease.clone()).await;
+    lease.finish_if_not_handed_off();
     response
 }
 
-async fn proxy_inner(gateway: &Gateway, request: Request<Body>) -> Response {
+async fn proxy_inner(
+    gateway: &Gateway,
+    request: Request<Body>,
+    lease: Arc<RequestLease>,
+) -> Response {
     let backend = match gateway.ensure_backend().await {
         Ok(backend) => backend,
         Err(error) => return error_response(StatusCode::BAD_GATEWAY, error.to_string()),
@@ -298,8 +308,11 @@ async fn proxy_inner(gateway: &Gateway, request: Request<Body>) -> Response {
     let response = match builder.send().await {
         Ok(response) => response,
         Err(error) => {
-            *gateway.inner.backend.lock().await = None;
+            let backend = gateway.inner.backend.lock().await.take();
             *gateway.inner.phase.write().await = LifecyclePhase::Standby;
+            if let Some(backend) = backend {
+                let _ = backend.stop().await;
+            }
             return error_response(StatusCode::BAD_GATEWAY, error.to_string());
         }
     };
@@ -311,9 +324,80 @@ async fn proxy_inner(gateway: &Gateway, request: Request<Body>) -> Response {
         }
         output = output.header(name, value);
     }
-    match output.body(Body::from_stream(response.bytes_stream())) {
-        Ok(response) => response,
+    let stream = RequestStream::new(response.bytes_stream(), lease.clone());
+    match output.body(Body::from_stream(stream)) {
+        Ok(response) => {
+            lease.handoff();
+            response
+        }
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+struct RequestLease {
+    gateway: Arc<Gateway>,
+    handed_off: AtomicBool,
+    finished: AtomicBool,
+}
+
+impl RequestLease {
+    fn new(gateway: Arc<Gateway>) -> Self {
+        Self {
+            gateway,
+            handed_off: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+        }
+    }
+
+    fn handoff(&self) {
+        self.handed_off.store(true, Ordering::Release);
+    }
+
+    fn finish_if_not_handed_off(&self) {
+        if !self.handed_off.load(Ordering::Acquire) {
+            self.finish();
+        }
+    }
+
+    fn finish(&self) {
+        if !self.finished.swap(true, Ordering::AcqRel) {
+            self.gateway.finish_request_sync();
+        }
+    }
+}
+
+struct RequestStream<S> {
+    inner: Pin<Box<S>>,
+    lease: Arc<RequestLease>,
+}
+
+impl<S> RequestStream<S> {
+    fn new(inner: S, lease: Arc<RequestLease>) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            lease,
+        }
+    }
+}
+
+impl<S: Stream + 'static> Stream for RequestStream<S> {
+    type Item = S::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.inner.as_mut().poll_next(cx) {
+            Poll::Ready(None) => {
+                this.lease.finish();
+                Poll::Ready(None)
+            }
+            other => other,
+        }
+    }
+}
+
+impl<S> Drop for RequestStream<S> {
+    fn drop(&mut self) {
+        self.lease.finish();
     }
 }
 
