@@ -59,7 +59,7 @@
 - [x] 写 mock backend 能力探测测试。
 - [x] 启动前按真实 `llama-server --help` 能力过滤不支持的参数；探测失败时安全回退并保留原始参数。
 - [x] 将能力过滤警告接入主日志。
-- [ ] 补充真实 Metal 版本兼容性矩阵。
+- [x] 补充 llama.cpp 0.3.0 真实 Metal 版本兼容性矩阵。
 - [x] 补齐子进程提前退出、stderr 尾部日志、OOM 熔断和重启后的状态清理。
 
 Tauri 壳层已直接托管 gateway，并在应用退出时触发 gateway shutdown；DMG、真实 Metal 能力探测和参数降级仍属于后续真机/发布验收。

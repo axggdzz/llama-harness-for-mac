@@ -14,8 +14,14 @@ async function refresh() {
     const resources = await json('/__resources__'); $('cpu').textContent = `${resources.cpu_usage_percent.toFixed(1)}%`; $('memory').textContent = `${(resources.used_memory_bytes / 1073741824).toFixed(1)} / ${(resources.total_memory_bytes / 1073741824).toFixed(1)} GB`; $('gpu').textContent = resources.gpu_backend;
     try {
       const capabilities = await json('/__capabilities__');
-      $('capabilities-output').textContent = Object.entries(capabilities).map(([name, supported]) => `${name}: ${supported ? '可用' : '不可用'}`).join('\n');
-      $('capability-note').textContent = Object.values(capabilities).every(Boolean) ? '当前后端支持全部探针。' : '部分后端能力不可用，相关功能会安全降级。';
+      const lines = [];
+      for (const [name, value] of Object.entries(capabilities)) {
+        if (name === 'degradations') continue;
+        if (typeof value === 'boolean') lines.push(`${name}: ${value ? '可用' : '不可用'}`);
+        else lines.push(`${name}: ${value || '未知'}`);
+      }
+      $('capabilities-output').textContent = lines.join('\n');
+      $('capability-note').textContent = capabilities.degradations?.length ? capabilities.degradations.join('\n') : '当前后端能力完整。';
     } catch (error) {
       $('capabilities-output').textContent = `能力探测失败：${error.message}`;
       $('capability-note').textContent = '后端未运行或不支持能力探测。';

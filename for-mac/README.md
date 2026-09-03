@@ -134,6 +134,7 @@ Metal/GGUF smoke testing, signing, notarization, and DMG validation remain
 machine-specific release checks.
 
 真实 Metal/GGUF 验收记录见 [`docs/2026-09-03-phase6e-real-metal-acceptance.md`](docs/2026-09-03-phase6e-real-metal-acceptance.md)。
+llama.cpp 兼容性矩阵见 [`docs/2026-09-03-llama-cpp-compatibility-matrix.md`](docs/2026-09-03-llama-cpp-compatibility-matrix.md)。
 
 Run `scripts/verify.sh` from `for-mac/` for the complete local verification
 sequence (Rust plus UI syntax and `.app` bundle).

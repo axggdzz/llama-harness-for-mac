@@ -164,6 +164,7 @@ async fn gateway_starts_backend_for_json_and_streaming_requests() {
     assert_eq!(capabilities["slots"], true);
     assert_eq!(capabilities["metrics"], true);
     assert_eq!(capabilities["tokenize"], true);
+    assert!(capabilities["degradations"].as_array().unwrap().len() >= 1);
     assert!(resources.get("gpu_backend").is_some());
     let metrics = client
         .get(format!("{base}/__backend/metrics"))

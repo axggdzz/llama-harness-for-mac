@@ -18,10 +18,21 @@ pub struct BackendProcess;
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct BackendCapabilities {
+    pub version: Option<String>,
     pub props: bool,
     pub slots: bool,
     pub metrics: bool,
     pub tokenize: bool,
+    pub slot_save_path: bool,
+    pub degradations: Vec<String>,
+}
+
+fn extract_backend_version(props: &serde_json::Value) -> Option<String> {
+    props
+        .get("build_info")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| props.get("version").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
 }
 
 fn filter_arguments_from_help(args: &[String], help: &str) -> Vec<String> {
@@ -277,27 +288,66 @@ impl BackendHandle {
     }
 
     pub async fn probe_capabilities(&self) -> BackendCapabilities {
-        let probe = |path: String| async {
-            self.client
-                .get(path)
-                .send()
-                .await
-                .map(|response| response.status().is_success())
-                .unwrap_or(false)
+        let props_body = match self
+            .client
+            .get(format!("{}/props", self.base_url()))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                response.json::<serde_json::Value>().await.ok()
+            }
+            _ => None,
         };
-        BackendCapabilities {
-            props: probe(format!("{}/props", self.base_url())).await,
-            slots: probe(format!("{}/slots", self.base_url())).await,
-            metrics: probe(format!("{}/metrics", self.base_url())).await,
-            tokenize: self
-                .client
-                .post(format!("{}/v1/tokenize", self.base_url()))
-                .json(&serde_json::json!({"content":""}))
-                .send()
-                .await
-                .map(|response| response.status().is_success())
-                .unwrap_or(false),
+        let slots = self.probe_endpoint("/slots").await;
+        let metrics = self.probe_endpoint("/metrics").await;
+        let tokenize = self
+            .client
+            .post(format!("{}/v1/tokenize", self.base_url()))
+            .json(&serde_json::json!({"content":""}))
+            .send()
+            .await
+            .map(|response| response.status().is_success())
+            .unwrap_or(false);
+        let props = props_body.is_some();
+        let mut degradations = Vec::new();
+        if !tokenize {
+            degradations.push("TokenGuard 将跳过真实 tokenize 并保留原请求".to_owned());
         }
+        if !metrics {
+            degradations.push("后端未启用 /metrics，统计页使用网关本地指标".to_owned());
+        }
+        if !self
+            .config
+            .args
+            .iter()
+            .any(|arg| arg == "--slot-save-path" || arg.starts_with("--slot-save-path="))
+        {
+            degradations
+                .push("未配置 --slot-save-path，KV 快照仅在后端支持绝对路径时可用".to_owned());
+        }
+        BackendCapabilities {
+            version: props_body.as_ref().and_then(extract_backend_version),
+            props,
+            slots,
+            metrics,
+            tokenize,
+            slot_save_path: self
+                .config
+                .args
+                .iter()
+                .any(|arg| arg == "--slot-save-path" || arg.starts_with("--slot-save-path=")),
+            degradations,
+        }
+    }
+
+    async fn probe_endpoint(&self, path: &str) -> bool {
+        self.client
+            .get(format!("{}{path}", self.base_url()))
+            .send()
+            .await
+            .map(|response| response.status().is_success())
+            .unwrap_or(false)
     }
 
     pub async fn stop(&self) -> Result<()> {
@@ -380,5 +430,17 @@ mod tests {
         assert!(!super::is_llama_server_binary(std::path::Path::new(
             "mock-llama-server"
         )));
+    }
+
+    #[test]
+    fn backend_version_prefers_build_info_and_accepts_version_fallback() {
+        assert_eq!(
+            super::extract_backend_version(&serde_json::json!({"build_info":"b10621"})),
+            Some("b10621".to_owned())
+        );
+        assert_eq!(
+            super::extract_backend_version(&serde_json::json!({"version":"0.3.0"})),
+            Some("0.3.0".to_owned())
+        );
     }
 }
