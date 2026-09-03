@@ -68,7 +68,7 @@ Tauri 壳层已直接托管 gateway，并在应用退出时触发 gateway shutdo
 
 **Files:** `for-mac/docs/`, `for-mac/README.md`, CI/release metadata under `for-mac/`
 
-- [ ] 在 Apple Silicon 上用真实 Metal llama-server 和 GGUF 完成 smoke、SSE、KV、休眠/唤醒验证。
+- [ ] 在 Apple Silicon 上用真实 Metal llama-server 和 GGUF 完成 smoke、SSE、KV、休眠/唤醒验证（smoke、SSE、KV 已通过；真实闲置休眠待补）。
 - [x] 提供可重复的 `scripts/verify.sh`，验证 Rust、UI 语法和 Tauri `.app` 构建。
 - [x] 在本机确认 Homebrew `llama-server` 为 Darwin arm64/AppleClang 构建，并验证缺失模型时提前退出。
 - [x] 通过 Rust 网关验证真实后端提前退出时返回结构化 502，且退出后无测试后端残留。
