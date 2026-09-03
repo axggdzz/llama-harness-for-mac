@@ -15,7 +15,7 @@
 ## 裁剪算法
 
 1. 从 `messages` 构造 `role: content` 文本并调用 `/v1/tokenize`。
-2. 预算内直接透传；tokenize 失败时记录降级结果并原样透传。
+2. 无 `user` 消息或预算内直接透传；tokenize 失败时记录降级结果并原样透传。
 3. 超预算时保留首个 user 之前的 system/前缀消息和最后一轮 user 及其后续 assistant/tool 消息；可删除的旧轮次使用二分搜索确定最少删除数量。
 4. 最小轮次集合仍超限时，选择最长字符串 content，最多 5 次按比例缩短，头尾各保留一半并追加 `[已截断 - Token Guard]`。
 5. 裁剪后仍超限返回 HTTP 400，错误体含 `token_guard`、`budget` 和 `tokens` 字段。

@@ -91,6 +91,7 @@ async fn gateway_returns_structured_400_when_token_guard_cannot_fit() {
     assert_eq!(response.status(), 400);
     let body = response.json::<serde_json::Value>().await.unwrap();
     assert_eq!(body["error"]["code"], "token_guard_over_budget");
+    assert_eq!(body["error"]["token_guard"], true);
     assert!(body["error"]["budget"].as_u64().is_some());
     let _ = shutdown.send(());
     task.await.unwrap();

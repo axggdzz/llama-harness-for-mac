@@ -51,6 +51,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn system_or_tool_only_requests_are_passed_through() {
+        let mut body =
+            json!({"messages":[{"role":"system","content":"x"},{"role":"tool","content":"y"}]});
+        let original = body.clone();
+        let config = TokenGuardConfig {
+            context_size: 1,
+            slot_count: 1,
+            reserved_output_tokens: 0,
+            reserved_prompt_overhead: 0,
+            enabled: true,
+        };
+        let report = TokenGuard::guard(&config, &mut body, |_text| async { Ok(999usize) })
+            .await
+            .unwrap();
+        assert!(report.skipped && !report.modified);
+        assert_eq!(body, original);
+    }
+
+    #[tokio::test]
     async fn removes_old_complete_turns_but_keeps_system_latest_and_tool_messages() {
         let mut body = json!({"messages":[
             {"role":"system","content":"rules"},
@@ -242,6 +261,19 @@ impl TokenGuard {
             });
         };
         if !config.enabled || messages.is_empty() {
+            return Ok(GuardReport {
+                modified: false,
+                skipped: true,
+                estimated_tokens: None,
+                final_tokens: None,
+                budget,
+                deleted_turns: 0,
+            });
+        }
+        if !messages
+            .iter()
+            .any(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        {
             return Ok(GuardReport {
                 modified: false,
                 skipped: true,

@@ -554,6 +554,7 @@ fn token_guard_error_response(budget: usize, tokens: usize) -> Response {
                 "message": format!("Token Guard: {tokens} tokens exceed budget {budget}"),
                 "type": "invalid_request_error",
                 "code": "token_guard_over_budget",
+                "token_guard": true,
                 "budget": budget,
                 "tokens": tokens,
             }
