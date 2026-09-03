@@ -1,7 +1,7 @@
 //! LlamaHarness macOS port entry point.
 
 use llama_harness_mac::{
-    config::{parse_backend_args, AppConfig},
+    config::{apply_environment_overrides, parse_backend_args, AppConfig},
     gateway::Gateway,
     instance::InstanceLock,
 };
@@ -11,9 +11,11 @@ use std::{path::PathBuf, sync::Arc};
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let mut config = AppConfig::default();
+    apply_environment_overrides(&mut config);
     if let Ok(saved) = AppConfig::load_from(config.config_path()) {
         config = saved;
     }
+    apply_environment_overrides(&mut config);
     let _instance_lock = InstanceLock::acquire(config.data_dir.join("gateway.lock"))?;
     if let Ok(executable) = std::env::var("LLAMA_SERVER") {
         config.backend_executable = Some(PathBuf::from(executable));

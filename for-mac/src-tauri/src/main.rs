@@ -1,15 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use llama_harness_mac::{config::{parse_backend_args, AppConfig}, gateway::Gateway, instance::InstanceLock};
+use llama_harness_mac::{config::{apply_environment_overrides, parse_backend_args, AppConfig}, gateway::Gateway, instance::InstanceLock};
 use std::{path::PathBuf, sync::Arc};
 use tauri::{Manager, RunEvent};
 use tokio::sync::oneshot;
 
 fn main() {
     let mut config = AppConfig::default();
+    apply_environment_overrides(&mut config);
     if let Ok(saved) = AppConfig::load_from(config.config_path()) {
         config = saved;
     }
+    apply_environment_overrides(&mut config);
     if let Ok(executable) = std::env::var("LLAMA_SERVER") {
         config.backend_executable = Some(PathBuf::from(executable));
     }

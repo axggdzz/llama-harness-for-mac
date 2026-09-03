@@ -82,6 +82,30 @@ pub fn parse_backend_args(raw: &str) -> Vec<String> {
         .unwrap_or_else(|_| raw.split_whitespace().map(str::to_owned).collect())
 }
 
+pub fn parse_u64_override(raw: &str) -> Option<u64> {
+    raw.trim().parse::<u64>().ok()
+}
+
+pub fn apply_environment_overrides(config: &mut AppConfig) {
+    if let Ok(data_dir) = std::env::var("LLAMA_DATA_DIR") {
+        if !data_dir.trim().is_empty() {
+            config.data_dir = PathBuf::from(data_dir);
+        }
+    }
+    if let Some(timeout) = std::env::var("LLAMA_IDLE_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| parse_u64_override(&value))
+    {
+        config.idle_timeout_ms = timeout;
+    }
+    if let Some(observe) = std::env::var("LLAMA_SLEEP_OBSERVE_MS")
+        .ok()
+        .and_then(|value| parse_u64_override(&value))
+    {
+        config.sleep_observe_ms = observe;
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -284,5 +308,12 @@ mod tests {
         assert_eq!(config.backend_slot_save_path(), Some("/tmp/slots".into()));
         config.backend_args = vec!["--slot-save-path=/tmp/slots".into()];
         assert_eq!(config.backend_slot_save_path(), Some("/tmp/slots".into()));
+    }
+
+    #[test]
+    fn numeric_environment_overrides_reject_invalid_values() {
+        assert_eq!(super::parse_u64_override("250"), Some(250));
+        assert_eq!(super::parse_u64_override(" 500 "), Some(500));
+        assert_eq!(super::parse_u64_override("not-a-number"), None);
     }
 }

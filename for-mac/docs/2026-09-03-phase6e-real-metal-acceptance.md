@@ -16,12 +16,13 @@
 - 通过 Rust 网关完成真实 SSE；`finish_reason=length` 自动续接并发送 `[DONE]`。
 - 真实 slot KV save/restore/erase 成功；`n_saved=0,n_written>0` 被正确记录为有效快照。
 - 网关停止后，8080 和 18090 均不再监听，未发现残留后端。
+- 使用 `LLAMA_IDLE_TIMEOUT_MS=500`、`LLAMA_SLEEP_OBSERVE_MS=300` 验证真实生命周期
+  `Running → Sleeping → Standby → Running`，唤醒后再次推理成功。
 
 ## 已知限制 / 待补
 
 - 该 llama.cpp 版本没有 `/v1/tokenize`，因此 TokenGuard 在真实后端走安全降级；TokenGuard
   的真实 tokenize 路径仍需支持该接口的 llama.cpp 版本验证。
 - 本次使用的 tiny 模型训练上下文为 128，适合 smoke，不代表生产模型质量或性能。
-- 闲置休眠验证需要启动网关时设置较短的 `idle_timeout_ms` 和 `sleep_observe_ms`；当前
-  CLI 尚未提供这两个环境变量覆盖，因此已保留 mock 生命周期测试，真实休眠/唤醒列为下一项。
+- 生产环境仍应根据模型加载耗时设置合理的闲置阈值；本次短阈值仅用于 smoke。
 - DMG、签名、公证和安装升级仍需发布环境验收。

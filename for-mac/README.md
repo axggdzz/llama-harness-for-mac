@@ -44,6 +44,9 @@ The daemon listens on `127.0.0.1:8080`. Configure a real Metal-enabled
 export LLAMA_SERVER=/absolute/path/to/llama-server
 export LLAMA_BACKEND_PORT=8081
 export LLAMA_SERVER_ARGS='--model /absolute/path/to/model.gguf --port 8081'
+# 可选：真机 smoke 时缩短闲置休眠窗口
+# export LLAMA_IDLE_TIMEOUT_MS=500
+# export LLAMA_SLEEP_OBSERVE_MS=300
 cargo run
 ```
 
