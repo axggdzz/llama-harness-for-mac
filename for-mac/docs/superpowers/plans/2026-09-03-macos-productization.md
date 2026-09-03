@@ -39,7 +39,7 @@
 
 **Files:** `for-mac/src/gateway.rs`, `for-mac/src/kv_cache.rs`, `for-mac/src/observability.rs`, `for-mac/tests/`
 
-- [ ] 写测试验证 SlotAffinity 分配后 KV restore/save/erase 的外部行为。
+- [x] 写测试验证 SlotAffinity 分配后 KV restore/save/erase 的外部行为。
 - [x] 在 gateway 中创建并持有 `KvCacheManager`，提供快照索引和操作端点。
 - [x] 从 JSON usage 和 restore 结果填充 token、速度、命中率统计。
 - [x] 通过日志端点提供轮转日志的安全尾部读取，限制单次读取大小。
@@ -69,5 +69,7 @@ Tauri 壳层已直接托管 gateway，并在应用退出时触发 gateway shutdo
 **Files:** `for-mac/docs/`, `for-mac/README.md`, CI/release metadata under `for-mac/`
 
 - [ ] 在 Apple Silicon 上用真实 Metal llama-server 和 GGUF 完成 smoke、SSE、KV、休眠/唤醒验证。
+- [x] 提供可重复的 `scripts/verify.sh`，验证 Rust、UI 语法和 Tauri `.app` 构建。
+- [x] 在本机确认 Homebrew `llama-server` 为 Darwin arm64/AppleClang 构建，并验证缺失模型时提前退出。
 - [ ] 验证 `.app`、DMG、签名、公证和安装升级；记录无法在受限环境执行的项目。
 - [ ] 更新 README 阶段状态和最终验收清单，确认 Windows 路径无改动。
