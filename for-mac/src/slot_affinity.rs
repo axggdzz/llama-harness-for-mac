@@ -2,7 +2,7 @@ use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Mutex,
@@ -125,6 +125,171 @@ impl SlotAffinity {
         values.sort_by(|a, b| b.last_active.cmp(&a.last_active));
         values
     }
+
+    pub fn allocate(&self, headers: &HeaderMap, auto_preemptive: &[String]) -> SlotAllocation {
+        let Some(key) = Self::affinity_key(headers) else {
+            return SlotAllocation {
+                slot: NEXT_RANDOM_SLOT.fetch_add(1, Ordering::Relaxed) % self.slot_count,
+                key: None,
+                new_binding: false,
+                evicted: None,
+            };
+        };
+        let auto_pre = auto_preemptive.iter().any(|prefix| {
+            !prefix.is_empty()
+                && key
+                    .to_ascii_lowercase()
+                    .starts_with(&prefix.to_ascii_lowercase())
+        });
+        let mut guard = self.inner.lock().expect("slot affinity mutex poisoned");
+        if guard.bindings.contains_key(&key) {
+            let should_promote = auto_pre
+                && !guard
+                    .bindings
+                    .get(&key)
+                    .is_some_and(|record| record.preemptive)
+                && guard.bindings.values().filter(|b| b.preemptive).count()
+                    < self.slot_count.saturating_sub(1);
+            let record = guard.bindings.get_mut(&key).expect("binding exists");
+            if should_promote {
+                record.preemptive = true;
+            }
+            record.last_active = SystemTime::now();
+            return SlotAllocation {
+                slot: record.slot,
+                key: Some(key),
+                new_binding: false,
+                evicted: None,
+            };
+        }
+
+        let used: HashSet<usize> = guard.bindings.values().map(|record| record.slot).collect();
+        let slot = (0..self.slot_count).find(|slot| !used.contains(slot));
+        let mut evicted = None;
+        let slot = slot.or_else(|| {
+            let victim_key = guard
+                .bindings
+                .iter()
+                .filter(|(_, record)| !record.preemptive)
+                .min_by_key(|(_, record)| record.last_active)
+                .map(|(key, _)| key.clone())
+                .or_else(|| {
+                    if auto_pre {
+                        guard
+                            .bindings
+                            .iter()
+                            .filter(|(key, record)| {
+                                record.preemptive && guard.tool_locked.contains(*key)
+                            })
+                            .min_by_key(|(_, record)| record.last_active)
+                            .map(|(key, _)| key.clone())
+                            .or_else(|| {
+                                guard
+                                    .bindings
+                                    .iter()
+                                    .filter(|(_, record)| record.preemptive)
+                                    .min_by_key(|(_, record)| record.last_active)
+                                    .map(|(key, _)| key.clone())
+                            })
+                    } else {
+                        None
+                    }
+                });
+            let victim_key = victim_key?;
+            let victim = guard.bindings.remove(&victim_key)?;
+            guard.tool_locked.remove(&victim_key);
+            evicted = Some(SlotBinding {
+                key: victim_key.clone(),
+                app: Self::app_name(&victim_key),
+                slot: victim.slot,
+                last_active: victim.last_active,
+                preemptive: victim.preemptive,
+                kv_cache: victim.kv_cache,
+            });
+            Some(victim.slot)
+        });
+        let slot = slot
+            .unwrap_or_else(|| NEXT_RANDOM_SLOT.fetch_add(1, Ordering::Relaxed) % self.slot_count);
+        let cap = self.slot_count.saturating_sub(1);
+        let final_pre = auto_pre
+            && guard
+                .bindings
+                .values()
+                .filter(|record| record.preemptive)
+                .count()
+                < cap;
+        guard.bindings.insert(
+            key.clone(),
+            BindingRecord {
+                slot,
+                last_active: SystemTime::now(),
+                preemptive: final_pre,
+                kv_cache: true,
+            },
+        );
+        SlotAllocation {
+            slot,
+            key: Some(key),
+            new_binding: true,
+            evicted,
+        }
+    }
+
+    pub fn set_preemptive(&self, key: &str, value: bool) {
+        let mut guard = self.inner.lock().expect("slot affinity mutex poisoned");
+        if guard.bindings.contains_key(key) {
+            let allowed = !value
+                || guard
+                    .bindings
+                    .get(key)
+                    .is_some_and(|record| record.preemptive)
+                || guard.bindings.values().filter(|b| b.preemptive).count()
+                    < self.slot_count.saturating_sub(1);
+            if allowed {
+                guard
+                    .bindings
+                    .get_mut(key)
+                    .expect("binding exists")
+                    .preemptive = value;
+            }
+        }
+    }
+
+    pub fn is_preemptive(&self, key: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("slot affinity mutex poisoned")
+            .bindings
+            .get(key)
+            .is_some_and(|record| record.preemptive)
+    }
+
+    pub fn mark_tool_locked(&self, key: &str) {
+        self.inner
+            .lock()
+            .expect("slot affinity mutex poisoned")
+            .tool_locked
+            .insert(key.to_string());
+    }
+    pub fn unmark_tool_locked(&self, key: &str) {
+        self.inner
+            .lock()
+            .expect("slot affinity mutex poisoned")
+            .tool_locked
+            .remove(key);
+    }
+
+    pub fn set_kv_cache(&self, key: &str, value: bool) {
+        if let Some(record) = self
+            .inner
+            .lock()
+            .expect("slot affinity mutex poisoned")
+            .bindings
+            .get_mut(key)
+        {
+            record.kv_cache = value;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -177,5 +342,72 @@ mod tests {
         assert_eq!(manager.slot_count(), 2);
         assert!(manager.snapshot().is_empty());
         assert!(SlotAffinity::affinity_key(&HeaderMap::new()).is_none());
+    }
+
+    fn key_headers(name: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-conversation-id", name.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn reuses_binding_and_evicts_least_recent_non_preemptive() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = SlotAffinity::new(2, dir.path().join("bindings.json"));
+        let first = manager.allocate(&key_headers("one"), &[]);
+        let second = manager.allocate(&key_headers("two"), &[]);
+        assert_ne!(first.slot, second.slot);
+        assert_eq!(manager.allocate(&key_headers("one"), &[]).slot, first.slot);
+        let third = manager.allocate(&key_headers("three"), &[]);
+        assert_eq!(
+            third.evicted.as_ref().map(|b| b.key.as_str()),
+            Some("webui_two")
+        );
+        assert_eq!(third.slot, second.slot);
+    }
+
+    #[test]
+    fn protects_preemptive_binding_and_caps_preemptive_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = SlotAffinity::new(3, dir.path().join("bindings.json"));
+        let first = manager.allocate(&key_headers("one"), &[]);
+        manager.set_preemptive("webui_one", true);
+        let second = manager.allocate(&key_headers("two"), &["webui_".into()]);
+        let third = manager.allocate(&key_headers("three"), &["webui_".into()]);
+        assert!(manager.is_preemptive("webui_one"));
+        assert_eq!(
+            manager.snapshot().iter().filter(|b| b.preemptive).count(),
+            2
+        );
+        let ordinary = manager.allocate(&key_headers("four"), &[]);
+        assert_ne!(
+            ordinary.evicted.as_ref().map(|b| b.key.as_str()),
+            Some("webui_one")
+        );
+        assert_eq!(
+            first.slot,
+            manager
+                .snapshot()
+                .iter()
+                .find(|b| b.key == "webui_one")
+                .unwrap()
+                .slot
+        );
+        assert!(second.new_binding && third.new_binding);
+    }
+
+    #[test]
+    fn tool_locked_preemptive_binding_is_eviction_candidate_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = SlotAffinity::new(3, dir.path().join("bindings.json"));
+        manager.allocate(&key_headers("one"), &["webui_".into()]);
+        manager.allocate(&key_headers("two"), &["webui_".into()]);
+        manager.mark_tool_locked("webui_one");
+        manager.set_preemptive("webui_one", true);
+        manager.set_preemptive("webui_two", true);
+        manager.allocate(&key_headers("three"), &[]);
+        assert!(manager.is_preemptive("webui_one"));
+        manager.unmark_tool_locked("webui_one");
+        assert!(manager.is_preemptive("webui_one"));
     }
 }
