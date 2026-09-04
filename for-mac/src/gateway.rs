@@ -55,6 +55,7 @@ struct GatewayInner {
     sleep_cancel: Arc<Notify>,
     monitor_stop: Arc<Notify>,
     request_gate: Mutex<()>,
+    started_at: Instant,
     thinking_mode: Mutex<thinking::ThinkingMode>,
     crash_count: AtomicUsize,
     logger: Option<Arc<RotatingLogger>>,
@@ -68,6 +69,9 @@ struct StatusResponse {
     backend_ready: bool,
     backend_port: u16,
     inflight: usize,
+    runtime_seconds: u64,
+    thinking_mode: thinking::ThinkingMode,
+    crash_count: usize,
     bindings: Vec<BindingStatus>,
 }
 
@@ -126,6 +130,7 @@ impl Gateway {
                 sleep_cancel: Arc::new(Notify::new()),
                 monitor_stop: Arc::new(Notify::new()),
                 request_gate: Mutex::new(()),
+                started_at: Instant::now(),
                 thinking_mode: Mutex::new(initial_thinking_mode),
                 crash_count: AtomicUsize::new(0),
                 logger,
@@ -262,6 +267,9 @@ impl Gateway {
             backend_ready: self.inner.backend.lock().await.is_some(),
             backend_port: self.inner.config.backend_port,
             inflight: self.inner.inflight.load(Ordering::SeqCst),
+            runtime_seconds: self.inner.started_at.elapsed().as_secs(),
+            thinking_mode: *self.inner.thinking_mode.lock().await,
+            crash_count: self.inner.crash_count.load(Ordering::Acquire),
             bindings: self
                 .inner
                 .affinity
@@ -313,6 +321,9 @@ impl Gateway {
     }
 
     async fn maybe_sleep(&self) {
+        if self.inner.config.idle_timeout_ms == 0 {
+            return;
+        }
         let gate = self.inner.request_gate.lock().await;
         if *self.inner.phase.read().await != LifecyclePhase::Running
             || self.inner.inflight.load(Ordering::SeqCst) != 0
@@ -425,6 +436,7 @@ async fn logs(State(gateway): State<Arc<Gateway>>, Query(query): Query<LogQuery>
     let kind = match query.kind.as_str() {
         "main" => LogKind::Main,
         "error" | "errors" => LogKind::Error,
+        "request_dump" | "request-dump" => LogKind::RequestDump,
         value
             if value
                 .strip_prefix("slot-")
@@ -604,7 +616,7 @@ async fn proxy_inner(
         let _ = logger.write(LogKind::Main, &format!("request {} {}", method, path));
         if gateway.inner.config.request_dump_enabled {
             let _ = logger.write(
-                LogKind::Main,
+                LogKind::RequestDump,
                 &format!("request_dump {}", String::from_utf8_lossy(&body)),
             );
         }

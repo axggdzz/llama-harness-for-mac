@@ -10,10 +10,12 @@ mod tests {
         logger.write(LogKind::Main, "main event").unwrap();
         logger.write(LogKind::Slot(2), "slot event").unwrap();
         logger.write(LogKind::Error, "error event").unwrap();
+        logger.write(LogKind::RequestDump, "request body").unwrap();
         logger.write(LogKind::Main, &"x".repeat(128)).unwrap();
         assert!(dir.path().join("main.log").is_file());
         assert!(dir.path().join("slot-2.log").is_file());
         assert!(dir.path().join("errors.log").is_file());
+        assert!(dir.path().join("request_dump.log").is_file());
         assert!(dir.path().join("main.log.1").is_file());
     }
 
@@ -62,6 +64,7 @@ pub enum LogKind {
     Main,
     Slot(usize),
     Error,
+    RequestDump,
 }
 
 pub struct RotatingLogger {
@@ -117,6 +120,7 @@ impl RotatingLogger {
             LogKind::Main => self.dir.join("main.log"),
             LogKind::Slot(slot) => self.dir.join(format!("slot-{slot}.log")),
             LogKind::Error => self.dir.join("errors.log"),
+            LogKind::RequestDump => self.dir.join("request_dump.log"),
         }
     }
 }

@@ -116,6 +116,41 @@ async fn idle_monitor_sleeps_backend_after_quiet_period() {
 }
 
 #[tokio::test]
+async fn zero_idle_timeout_disables_automatic_sleep() {
+    let mut config = config(18087);
+    config.idle_timeout_ms = 0;
+    config.sleep_observe_ms = 20;
+    let (gateway, base, shutdown, task) = start_gateway(config).await;
+    let client = Client::new();
+    assert_eq!(
+        client
+            .post(format!("{base}/v1/chat/completions"))
+            .json(&serde_json::json!({"model":"mock","messages":[]}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    sleep(Duration::from_millis(150)).await;
+    let status = client
+        .get(format!("{base}/__status__"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        status["phase"],
+        serde_json::to_value(LifecyclePhase::Running).unwrap()
+    );
+    assert!(gateway.backend_pid().await.is_some());
+    let _ = shutdown.send(());
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn request_during_sleep_observation_cancels_sleep() {
     let mut config = config(18086);
     config.idle_timeout_ms = 60;

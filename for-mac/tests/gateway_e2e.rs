@@ -105,6 +105,9 @@ async fn gateway_starts_backend_for_json_and_streaming_requests() {
         status["phase"],
         serde_json::to_value(LifecyclePhase::Running).unwrap()
     );
+    assert!(status["runtime_seconds"].is_number());
+    assert_eq!(status["thinking_mode"], "off");
+    assert_eq!(status["crash_count"], 0);
     assert_eq!(status["bindings"][0]["key"], "webui_same-session");
     let stats = client
         .get(format!("{base}/__stats__"))
