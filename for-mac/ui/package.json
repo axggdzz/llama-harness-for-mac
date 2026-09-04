@@ -1,0 +1,15 @@
+{
+  "name": "llama-harness-macos-ui",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "prepare-assets": "node scripts/copy-assets.mjs",
+    "tauri": "cd ../src-tauri && ../ui/node_modules/.bin/tauri",
+    "dev": "npm run prepare-assets && cd ../src-tauri && ../ui/node_modules/.bin/tauri dev",
+    "build": "npm run prepare-assets && cd ../src-tauri && ../ui/node_modules/.bin/tauri build --bundles app",
+    "build:dmg": "npm run prepare-assets && cd ../src-tauri && ../ui/node_modules/.bin/tauri build --bundles dmg"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "LlamaHarness",
+  "version": "0.1.0",
+  "identifier": "com.axggdzz.llamaharness",
+  "build": { "frontendDist": "../ui/dist" },
+  "app": {
+    "windows": [{ "title": "LlamaHarness for macOS", "width": 1360, "height": 860, "minWidth": 1024, "minHeight": 680 }],
+    "security": { "csp": "default-src 'self' http://127.0.0.1:8080; connect-src 'self' http://127.0.0.1:8080; style-src 'self' 'unsafe-inline'" }
+  },
+  "bundle": { "active": true, "targets": ["app", "dmg"], "category": "DeveloperTool", "icon": ["icons/icon.png"] }
+}

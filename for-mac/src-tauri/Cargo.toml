@@ -1,0 +1,16 @@
+[package]
+name = "llama-harness-ui"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+llama-harness-mac = { path = ".." }
+tokio = { version = "1.39", features = ["rt", "sync", "net"] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+default = ["custom-protocol"]
