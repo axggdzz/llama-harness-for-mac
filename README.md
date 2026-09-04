@@ -26,8 +26,8 @@ Windows 基线的源码、测试和设计文档已完整归档到 `for-win/`；m
 
 llama‑cpp 内置包含两套 LRU 机制，本项目做差异化处理：
 
-2. ✂️ **彻底关闭 prompt‑cache 内存层 LRU 驱逐**：该层为无业务感知的静默驱逐，无通知、不可观测，会随机丢弃高价值 Agent KV，改用 RAMDisk 快照接管持久化；
-3. 🛡️ **接纳并兜底 slot 槽位分配层 LRU / LCP 相似度匹配**：尊重底座原生多槽调度逻辑，不做对抗式强制关闭；依靠日志埋点感知抢占事件，RAMDisk 快照做补偿恢复；
+1. ✂️ **彻底关闭 prompt‑cache 内存层 LRU 驱逐**：该层为无业务感知的静默驱逐，无通知、不可观测，会随机丢弃高价值 Agent KV，改用 RAMDisk 快照接管持久化；
+1. 🛡️ **接纳并兜底 slot 槽位分配层 LRU / LCP 相似度匹配**：尊重底座原生多槽调度逻辑，不做对抗式强制关闭；依靠日志埋点感知抢占事件，RAMDisk 快照做补偿恢复；
 
 > 设计思想：**底座优先，上层兜底，尽力而为**。最大限度复用 llama‑cpp 原生调度红利；底层发生抢占扰动由 Harness 观测、告警、快照补偿，隔离对上层 Agent 业务的冲击。
 
@@ -131,10 +131,10 @@ dotnet test for-win/LlamaHarness.Tests/LlamaHarness.Tests.csproj -c Release
 
 ### 使用步骤
 
-2. 运行`LlamaHarness.exe`
-3. 在【配置管理】页签填入 llama‑server 路径、模型路径，调整上下文、并行槽数、RAMDisk 快照目录等参数
-4. 保存配置，点击【启动 / 唤醒】
-5. 客户端连接本机 `http://127.0.0.1:8080`，使用标准 OpenAI‑compatible 接口发起 Agent 请求
+1. 运行`Llama-harness.exe`
+1. 在【配置管理】页签填入 llama‑server 路径、模型路径，调整上下文、并行槽数、RAMDisk 快照目录等参数
+1. 保存配置，点击【启动 / 唤醒】
+1. 客户端连接本机 `http://127.0.0.1:8080`，使用标准 OpenAI‑compatible 接口发起 Agent 请求
 
 > 前端网关端口固定 8080；llama‑cpp 后端端口由程序自动探测分配，客户端无需关心。
 
@@ -180,16 +180,16 @@ npm run build       # 生成 macOS .app
 
 ## 📐 设计原则（摘录）
 
-2. **底座优先，上层兜底，尽力而为**：复用 llama‑cpp 原生能力，不激进对抗底层调度；风险在网关层做观测与补偿。
-3. **配置职责单一**：一个配置开关只负责一类能力；快照持久化与槽位强占拆分为两套独立配置。
-4. **可观测优先**：所有边界异常输出带统一标记的日志埋点，便于 grep 检索与外部 metrics 统计。
-5. **尽力自愈，不掩盖硬件故障**：IO 损坏、硬件异常输出告警，不会盲目自动调参掩盖底层问题。
+1. **底座优先，上层兜底，尽力而为**：复用 llama‑cpp 原生能力，不激进对抗底层调度；风险在网关层做观测与补偿。
+1. **配置职责单一**：一个配置开关只负责一类能力；快照持久化与槽位强占拆分为两套独立配置。
+1. **可观测优先**：所有边界异常输出带统一标记的日志埋点，便于 grep 检索与外部 metrics 统计。
+1. **尽力自愈，不掩盖硬件故障**：IO 损坏、硬件异常输出告警，不会盲目自动调参掩盖底层问题。
 
 ## 📝 后续规划
 
-2. 输出`baseline‑reference.md`：不同硬件性能基线，异常事件健康阈值；
-3. 开发 Agent Skill：读取本地 metrics 监控数据，对照基线输出参数调优建议（仅输出建议，不自动覆写配置）；
-4. 持续丰富手动验证清单与自动化测试用例。
+1. 输出`baseline‑reference.md`：不同硬件性能基线，异常事件健康阈值；
+1. 开发 Agent Skill：读取本地 metrics 监控数据，对照基线输出参数调优建议（仅输出建议，不自动覆写配置）；
+1. 持续丰富手动验证清单与自动化测试用例。
 
 ## License
 
@@ -203,11 +203,11 @@ MIT License
 
 ## 前置准备
 
-2. 操作系统： Windows 10 / Windows 11
-3. 安装 [.NET 8 SDK](https://dotnet.microsoft.com/zh%E2%80%91cn/download/dotnet/8.0)
-4. 编译好 **llama‑cpp**，拿到 `llama‑server.exe`
-5. GGUF 模型文件（推荐 Qwen 系列等支持工具调用的模型）
-6. 建议配置 RAMDisk（例如 ImDisk）作为 KV 快照目录，`g:/temp`，也可以先用普通 SSD 目录临时测试。
+1. 操作系统： Windows 10 / Windows 11
+1. 安装 [.NET 8 SDK](https://dotnet.microsoft.com/zh%E2%80%91cn/download/dotnet/8.0)
+1. 编译好 **llama‑cpp**，拿到 `llama‑server.exe`
+1. GGUF 模型文件（推荐 Qwen 系列等支持工具调用的模型）
+1. 建议配置 RAMDisk（例如 ImDisk）作为 KV 快照目录，`g:/temp`，也可以先用普通 SSD 目录临时测试。
 
 > ⚠️ 重要提示：
 > 本项目**只是网关代理程序，不内置 llama‑cpp 和模型权重**，需要你自行准备。
@@ -223,15 +223,15 @@ dotnet build for-win/LlamaHarness/LlamaHarness.csproj -c Release
 
 ## 基础配置步骤
 
-2. 打开程序，切换到【配置管理】页签
+1. 打开程序，切换到【配置管理】页签
 
-3. 填写关键路径：
+1. 填写关键路径：
 
    - `exe`：你的 `llama‑server.exe` 完整路径
    - `model`：GGUF 模型完整路径
    - `KvCachePath`：快照目录，优先 RAMDisk，如 `g:/temp`
 
-4. 核心参数参考（可按你的显卡调整）
+1. 核心参数参考（可按你的显卡调整）
 
    ```
    CtxSize: 65536
@@ -242,16 +242,16 @@ dotnet build for-win/LlamaHarness/LlamaHarness.csproj -c Release
    ReservedPromptOverhead: 10240
    ```
 
-5. 点击页面下方【保存】，配置写入 `config/config.json`。
+1. 点击页面下方【保存】，配置写入 `config/config.json`。
 
 > `CacheRamMiB=0 / NoCacheIdleSlots=true` 为推荐生产配置，关闭 llama‑cpp 内置 prompt‑cache，由 Harness+RAMDisk 接管 KV 持久化。
 > 如果你需要回退旧模式：设置 `CacheRamMiB=8192`，`NoCacheIdleSlots=false`。
 
 ## 启动服务
 
-2. 点击左侧面板【启动 / 唤醒】按钮；
-3. UI 状态会从 `待机中` → `唤醒中` → `预热中` → `运行中`；
-4. 启动成功后，**网关固定监听 `http://127.0.0.1:8080`**；llama‑server 使用自动探测的后端端口，客户端无需关心。
+1. 点击左侧面板【启动 / 唤醒】按钮；
+1. UI 状态会从 `待机中` → `唤醒中` → `预热中` → `运行中`；
+1. 启动成功后，**网关固定监听 `http://127.0.0.1:8080`**；llama‑server 使用自动探测的后端端口，客户端无需关心。
 
 > Warming「预热中」阶段会执行 eager restore + dummy 预热，属于正常现象，耐心等待完成。
 
@@ -322,29 +322,29 @@ A：不会。
 
 A：
 
-2. 强烈建议把 `KvCachePath` 指向 **RAMDisk（内存虚拟盘）**，SSD 也可用，但速度会下降；机械硬盘不建议存放 KV 快照；
-3. 快照越大（saved_n_tokens 越大），restore 耗时越高，属于物理 IO + 显存拷贝固有开销；
-4. 尽量减少不必要的 slot 抢占：主力 Agent 可配置 `AutoPreemptiveApps` 开启强占锁槽，减少抢占触发次数。
+1. 强烈建议把 `KvCachePath` 指向 **RAMDisk（内存虚拟盘）**，SSD 也可用，但速度会下降；机械硬盘不建议存放 KV 快照；
+1. 快照越大（saved_n_tokens 越大），restore 耗时越高，属于物理 IO + 显存拷贝固有开销；
+1. 尽量减少不必要的 slot 抢占：主力 Agent 可配置 `AutoPreemptiveApps` 开启强占锁槽，减少抢占触发次数。
 
 ### Q6：TokenGuard 依然报 400 上下文超限？
 
 A：
 
-2. 检查 `ReservedPromptOverhead`，工具调用多的 Agent，可以适当调大预留值（如 16384、20480），预留 tools schema、jinja 渲染隐形 token；
-3. 确认 `CtxSize`、`Parallel` 设置合理；
-4. 程序内置 400 自愈分支：捕获超限后自动收紧预算、废弃 KV 重试；如果仍然频繁触发，说明单轮业务真实 token 已经逼近模型上下文硬上限，需要业务侧裁剪对话历史。
+1. 检查 `ReservedPromptOverhead`，工具调用多的 Agent，可以适当调大预留值（如 16384、20480），预留 tools schema、jinja 渲染隐形 token；
+1. 确认 `CtxSize`、`Parallel` 设置合理；
+1. 程序内置 400 自愈分支：捕获超限后自动收紧预算、废弃 KV 重试；如果仍然频繁触发，说明单轮业务真实 token 已经逼近模型上下文硬上限，需要业务侧裁剪对话历史。
 
 ### Q7：Warming 预热时间很长，或者 restore 失败？
 
 A：
 
-2. Warming 有 60s 超时兜底，超时不会阻塞进入 Running；
-3. 检查 `KvCachePath` 目录读写权限，磁盘空间是否充足；
-4. 查看日志 `[EDGE‑CASE‑SNAPSHOT‑CORRUPT]`，快照损坏会自动废弃快照降级全量 prefill。
+1. Warming 有 60s 超时兜底，超时不会阻塞进入 Running；
+1. 检查 `KvCachePath` 目录读写权限，磁盘空间是否充足；
+1. 查看日志 `[EDGE‑CASE‑SNAPSHOT‑CORRUPT]`，快照损坏会自动废弃快照降级全量 prefill。
 
-### Q8：支持 Linux / MacOS 吗？
+### Q8：支持 Linux / macOS 吗？
 
-A：当前版本 UI 层为 WinForms，**仅支持 Windows**；核心调度网关逻辑理论可移植，但目前没有做跨平台适配。
+A：macOS 已支持，版本位于 `for-mac/`，使用 Rust/Tauri 2 和 Metal，优先适配 Apple Silicon；Windows 版本位于 `for-win/`，使用 C# WinForms 和 CUDA。Linux 版本目前尚未适配。两个已支持平台的功能语义保持一致，但平台适配和构建方式不同。
 
 ### Q9：并发可以开很大吗，Parallel 设置几十？
 
