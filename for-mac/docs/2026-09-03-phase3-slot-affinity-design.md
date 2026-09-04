@@ -2,7 +2,7 @@
 
 ## 目标
 
-在不修改根目录 Windows C# 基线的前提下，为 Rust/macOS 网关加入多槽亲和调度的纯内存与持久化核心。该阶段只负责请求到 slot 的稳定分配和绑定生命周期；KV save/restore/erase 留给第三阶段 B，通过明确的驱逐事件接口接入。
+在不修改 `for-win/` Windows C# 基线的前提下，为 Rust/macOS 网关加入多槽亲和调度的纯内存与持久化核心。该阶段只负责请求到 slot 的稳定分配和绑定生命周期；KV save/restore/erase 留给第三阶段 B，通过明确的驱逐事件接口接入。
 
 ## 范围与不变量
 

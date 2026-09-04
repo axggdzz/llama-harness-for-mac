@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - 所有 Rust/macOS 代码、测试、文档和构建配置只放在 `for-mac/`。
-- 根目录 `LlamaHarness/` Windows C# 工程保持不变。
+- `for-win/LlamaHarness/` Windows C# 工程保持不变。
 - 进程启动使用参数数组；路径使用 macOS Application Support；不假设 `.exe`、CUDA 或 `nvidia-smi`。
 - 每个任务先写行为测试，再实现最小改动；每个任务结束运行 `cargo fmt --check`, `cargo check`, `cargo test`（前端任务另运行 Node/Tauri 构建）。
 

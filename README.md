@@ -4,10 +4,23 @@
 >
 > 专为低并发、高可靠复杂 Agent 任务深度优化。
 
-Llama‑cpp‑harness 是 Windows 平台面向工程开发者的 **llama‑cpp（llama‑server）智能代理网关**。
+Llama‑cpp‑harness 是面向工程开发者的 **llama‑cpp（llama‑server）智能代理网关**，同时提供 Windows C# 和 macOS Rust 两个平台实现。
 不简单依靠降低模型规模、缩短上下文来妥协显存压力；通过**业务语义层显存 / KV 缓存精细化治理**，在硬件物理上限之内，榨取出更长上下文、更少无效重算、更高任务稳定性。
 
 > llama‑cpp 只负责「能不能跑」；Harness 负责「怎么跑的高效、稳定」。
+
+## 平台版本
+
+| 平台 | 目录 | 状态 | 技术栈 |
+| --- | --- | --- | --- |
+| Windows 基线 | [`for-win/`](for-win/) | WinForms 基线实现 | .NET 8、C#、CUDA/NVIDIA |
+| macOS 版本 | [`for-mac/`](for-mac/) | Rust/Tauri 2 持续开发 | Metal、Apple Silicon、Unix 进程组 |
+
+Windows 基线的源码、测试和设计文档已完整归档到 `for-win/`；macOS 版本的源码、测试、文档和构建配置全部位于 `for-mac/`。两套实现共享 OpenAI 兼容网关、Slot/KV、TokenGuard 和生命周期设计语义，但平台适配代码互不混用。
+
+- macOS 开发分支：[`feat/macos-phase2-lifecycle`](https://github.com/axggdzz/llama-harness-for-mac/tree/feat/macos-phase2-lifecycle)
+- macOS 迁移规范：[`for-mac/docs/spec.md`](for-mac/docs/spec.md)
+- Windows 基线说明：[`for-win/README.md`](for-win/README.md)
 
 ## 核心定位说明
 
@@ -52,15 +65,15 @@ llama‑cpp 内置包含两套 LRU 机制，本项目做差异化处理：
 
 ### 📊 全链路可观测
 
-- WinForms 仪表盘 UI：日志、统计、槽位绑定管理、系统资源、llama‑cpp 三接口（`/slots` `/props` `/metrics`）手动采集；
+- WinForms/Tauri 仪表盘 UI：日志、统计、槽位绑定管理、系统资源、llama‑cpp 三接口（`/slots` `/props` `/metrics`）手动采集；
 - 独立分级日志流水线：主日志、槽位事件日志、错误告警日志、请求 dump 日志，日志文件自动轮切；
 - EDGE‑CASE 边界事件埋点：快照损坏、快照保存失败、上下文超限，全部可被外部 DuckDB+Streamlit 采集做长期运行分析；
-- 硬件资源采集：CPU、内存、NVIDIA GPU 显存采样。
+- 硬件资源采集：Windows 提供 CPU、内存、NVIDIA GPU 显存采样；macOS 提供 CPU、统一内存和 Metal 能力信息。
 
 ### 🎛️ 调度能力
 
 - **按需唤醒 / 闲置休眠**：无任务时杀掉 llama‑cpp 完全释放显存；有推理请求自动唤醒；休眠前自动保存全部有效 KV 快照；
-- Intel 混合 CPU P‑核亲和绑定，支持运行时漂移自愈；
+- Windows 支持 Intel 混合 CPU P‑核亲和绑定和运行时漂移自愈；macOS 显示等价能力状态，不伪造 P 核/NVIDIA 指标；
 - OpenAI 兼容代理网关，客户端对接地址固定，后端 llama‑cpp 端口自动探测。
 
 ## 📊 和同类项目对比
@@ -78,23 +91,25 @@ llama‑cpp 内置包含两套 LRU 机制，本项目做差异化处理：
 
 ## 🧩 技术栈
 
-- UI：WinForms .NET 8（零第三方 NuGet 依赖，BCL 原生 API）
+- Windows UI：WinForms .NET 8（零第三方 NuGet 依赖，BCL 原生 API）
+- macOS UI：Tauri 2 + HTML/CSS/JavaScript，Rust 网关核心
 - 后端：llama‑cpp llama‑server（HTTP OpenAI 兼容接口）
-- GPU：NVIDIA CUDA
+- GPU：Windows NVIDIA CUDA；macOS Metal
 - 观测配套：Python + Streamlit + DuckDB（外部数据分析，不属于主程序 exe）
 
 ## 📁 项目结构
 
 ```
-lunch/
-├── LlamaHarness/          # C#主程序WinForms
-├── LlamaHarness.Tests/    # XUnit自动化测试套件
-├── config/                # 运行时配置（config.json / slot_bindings.json / kv_cache_index.json）
-├── logs/                  # 分级日志目录，自动轮切
-└── docs/
-    ├── 架构设计说明书.md          # 完整架构、模块、变更历史、约束、故障矩阵
-    ├── RAMDisk快照全权接管工程方案.md
-    └── baseline‑reference.md     # 硬件&业务基线参考文档（待补充）
+llama-harness-for-mac/
+├── for-win/                 # Windows C# WinForms 基线（源码、测试、文档）
+│   ├── LlamaHarness/
+│   ├── LlamaHarness.Tests/
+│   ├── docs/
+│   └── README.md
+├── for-mac/                 # Rust/macOS Metal 实现、Tauri UI、测试和文档
+├── docs/agents/             # 仓库级协作元文档
+├── AGENTS.md
+└── README.md
 ```
 
 ## 🔨 构建 & 运行
@@ -109,8 +124,9 @@ lunch/
 ### 编译
 
 ```
-msbuild LlamaHarness.sln /p:Configuration=Release
-# 或者Visual Studio打开解决方案F5编译运行
+dotnet build for-win/LlamaHarness/LlamaHarness.csproj -c Release
+# 测试
+dotnet test for-win/LlamaHarness.Tests/LlamaHarness.Tests.csproj -c Release
 ```
 
 ### 使用步骤
@@ -121,6 +137,31 @@ msbuild LlamaHarness.sln /p:Configuration=Release
 5. 客户端连接本机 `http://127.0.0.1:8080`，使用标准 OpenAI‑compatible 接口发起 Agent 请求
 
 > 前端网关端口固定 8080；llama‑cpp 后端端口由程序自动探测分配，客户端无需关心。
+
+### macOS Rust/Tauri 版本
+
+macOS 版本位于 [`for-mac/`](for-mac/)，优先支持 Apple Silicon 和 Metal，不使用 CUDA、`nvidia-smi` 或 Windows `.exe` 路径。它保留 OpenAI 兼容网关、按需启停、SlotAffinity、KV 快照、TokenGuard、SSE 续接、崩溃恢复和七个中文页签。
+
+```bash
+cd for-mac
+cargo test
+
+# 配置真实 Metal llama-server 后启动网关
+export LLAMA_SERVER=/absolute/path/to/llama-server
+export LLAMA_BACKEND_PORT=8081
+export LLAMA_SERVER_ARGS='--model /absolute/path/to/model.gguf --port 8081'
+cargo run
+```
+
+桌面 UI 构建：
+
+```bash
+cd for-mac/ui
+npm install
+npm run build       # 生成 macOS .app
+```
+
+网关前端固定监听 `http://127.0.0.1:8080`；macOS 配置、日志和 KV 文件使用 Application Support 目录。完整验收和 llama.cpp 兼容性记录见 [`for-mac/docs/`](for-mac/docs/)。
 
 ## ⚙️ 关键配置说明（config.json）
 
@@ -135,7 +176,7 @@ msbuild LlamaHarness.sln /p:Configuration=Release
 | `AutoSnapshotKeys`       | 仅做快照持久化，**不会锁槽**；崩溃重启可恢复，但允许被 slot‑LRU 正常抢占              |
 | `KvCachePath`            | RAMDisk/SSD 快照输出目录，开启 save/restore 的必要条件                                |
 
-> 更多完整字段、约束、回滚策略，参考：[docs / 架构设计说明书.md](docs/%E6%9E%B6%E6%9E%84%E8%AE%BE%E8%AE%A1%E8%AF%B4%E6%98%8E%E4%B9%A6.md)
+> 更多完整字段、约束、回滚策略，参考：[for-win/docs / 架构设计说明书.md](for-win/docs/%E6%9E%B6%E6%9E%84%E8%AE%BE%E8%AE%A1%E8%AF%B4%E6%98%8E%E4%B9%A6.md)
 
 ## 📐 设计原则（摘录）
 
@@ -175,10 +216,10 @@ MIT License
 
 ```
 # Release编译
-msbuild LlamaHarness.sln /p:Configuration=Release
+dotnet build for-win/LlamaHarness/LlamaHarness.csproj -c Release
 ```
 
-编译产物输出在 `LlamaHarness\bin\Release\net8.0‑windows\`，运行 `LlamaHarness.exe`。
+编译产物输出在 `for-win/LlamaHarness/bin/Release/net8.0-windows/`，运行 `Llama-harness.exe`。
 
 ## 基础配置步骤
 
@@ -333,6 +374,6 @@ A：目前没有自动覆写配置的自动调参。后续计划输出基线参�
 
 ---
 
-完整底层原理、模块细节、变更历史，请查阅 [docs / 架构设计说明书.md](docs/%E6%9E%B6%E6%9E%84%E8%AE%BE%E8%AE%A1%E8%AF%B4%E6%98%8E%E4%B9%A6.md)。
+完整 Windows 基线原理、模块细节、变更历史，请查阅 [for-win/docs / 架构设计说明书.md](for-win/docs/%E6%9E%B6%E6%9E%84%E8%AE%BE%E8%AE%A1%E8%AF%B4%E6%98%8E%E4%B9%A6.md)；macOS 实现说明见 [`for-mac/README.md`](for-mac/README.md)。
 
 ## 

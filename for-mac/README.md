@@ -1,6 +1,6 @@
 # LlamaHarness for macOS
 
-This directory contains the Rust/macOS port. The original Windows WinForms implementation remains in the repository root and must not be mixed with this port.
+This directory contains the Rust/macOS port. The original Windows WinForms implementation lives under [`for-win/`](../for-win/) and must not be mixed with this port.
 
 ## Scope
 
