@@ -10,4 +10,7 @@ Single-context layout with a root `CONTEXT.md` and `docs/adr/`. See `docs/agents
 
 ### Platform separation
 
-The repository root is the Windows C# baseline. The Rust/macOS port lives exclusively under `for-mac/`; keep implementation, tests, and Mac-specific documentation there. See `for-mac/README.md`.
+The Windows C# baseline lives under `for-win/`, while the Rust/macOS port lives
+exclusively under `for-mac/`. Keep implementation, tests, platform-specific
+documentation, and build configuration in the corresponding directory. See
+`for-win/README.md` and `for-mac/README.md`.

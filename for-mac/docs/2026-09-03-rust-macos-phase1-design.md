@@ -2,7 +2,7 @@
 
 ## 目标
 
-在 `for-mac/` 内建立可测试的 Rust 核心，完成固定前端端口的 OpenAI 兼容网关、按需启动和停止 llama-server、readiness 检测、普通/流式请求转发，以及可控的 mock llama-server。根目录的 Windows C# 基线不参与编译，也不修改。
+在 `for-mac/` 内建立可测试的 Rust 核心，完成固定前端端口的 OpenAI 兼容网关、按需启动和停止 llama-server、readiness 检测、普通/流式请求转发，以及可控的 mock llama-server。`for-win/` 下的 Windows C# 基线不参与编译，也不修改。
 
 ## 范围与边界
 

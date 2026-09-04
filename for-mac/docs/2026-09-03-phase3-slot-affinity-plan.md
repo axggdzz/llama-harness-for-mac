@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - All Rust/macOS implementation, tests, docs, and build configuration stay under `for-mac/`.
-- The root Windows C# implementation remains unchanged.
+- The `for-win/` Windows C# implementation remains unchanged.
 - `slot_count` is at least 1; slot IDs are zero-based.
 - Unknown requests use a random slot and never create a persistent binding.
 - Persistence failures do not fail request routing; malformed, duplicate, and out-of-range records are skipped.
@@ -151,7 +151,7 @@ Create `Option<Arc<SlotAffinity>>` in `GatewayInner` when configured slot count 
 
 - [ ] **Step 4: Run verification**
 
-Run `cargo fmt --check`, `cargo check --manifest-path for-mac/Cargo.toml`, `cargo test --manifest-path for-mac/Cargo.toml`, and `git diff --check`. Also verify `git diff origin/main...HEAD -- LlamaHarness LlamaHarness.Tests` is empty.
+Run `cargo fmt --check`, `cargo check --manifest-path for-mac/Cargo.toml`, `cargo test --manifest-path for-mac/Cargo.toml`, and `git diff --check`. Also verify `git diff origin/main...HEAD -- for-win/LlamaHarness for-win/LlamaHarness.Tests` is empty.
 
 - [ ] **Step 5: Commit**
 
@@ -159,4 +159,3 @@ Run `cargo fmt --check`, `cargo check --manifest-path for-mac/Cargo.toml`, `carg
 git add for-mac/src/config.rs for-mac/src/gateway.rs for-mac/src/lib.rs for-mac/tests/gateway_e2e.rs
 git commit -m "feat(mac): route gateway requests through SlotAffinity"
 ```
-

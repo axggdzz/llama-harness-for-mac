@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Keep all Rust/macOS implementation, tests, docs, and build configuration under `for-mac/`.
-- Do not modify or delete the root `LlamaHarness/` Windows implementation.
+- Do not modify or delete the `for-win/LlamaHarness/` Windows implementation.
 - Bind the public gateway to `127.0.0.1:8080`; backend uses an independent port.
 - Spawn commands from argument arrays; never build a shell command string.
 - Use Unix process groups with SIGTERM then timed SIGKILL cleanup.
